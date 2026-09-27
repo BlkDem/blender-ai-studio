@@ -265,6 +265,36 @@ are often on different sides of a filesystem, and a model that lands somewhere
 Blender cannot read is a model that cannot be imported. The importer says so in
 those terms, and reports the path it actually handed over.
 
+## The vision loop
+
+Rendering is the one tool result a model can act on without parsing text, so the
+loop is: render, look, correct.
+
+Closing it needed three things that all existed and none of which was connected.
+A render comes back as a *path on Blender's side of the filesystem*, and
+`blender://render/latest` returns the bytes — read from the MCP server's own
+filesystem, which in the usual arrangement (server in WSL, Blender on Windows) is
+a different machine. So the studio reads the render itself, translating the path
+across the boundary; the importer already had to do exactly this for generated
+models. The image then goes into the next request as a content part, encoded per
+provider, and the chat card shows it rather than saying how many there were.
+
+Whether a model is *sent* the picture is asked, not assumed: the model catalogue
+declares `supports_vision`, and a text-only model gets the text alone, because
+sending an image to a model that cannot see is a request it rejects.
+
+Verified live against Qwen2.5-VL-3B: a real render of the real scene, read across
+the boundary, and the model described what was in it.
+
+## Projects
+
+A project is a named piece of work with a starting `.blend`, and every turn,
+generation and review belongs to one. Opening a project brings its transcript
+back; closing it stops filing; deleting it takes its conversations with it. A
+project's file is opened in Blender **from a copy** — the file a project starts
+from is never the file being edited, or the next run would not start where the
+last one did.
+
 ## Benchmark
 
 The point of a benchmark here is that runs are *comparable*, so every run gets
@@ -403,22 +433,34 @@ and therefore what makes tool calling work.
 
 ## Testing
 
-219 tests, no network and no Blender needed for the majority.
+292 tests, no network and no Blender needed for the majority.
 
 | Area | What is covered |
 |---|---|
-| LLM | request shape per provider, streaming, tool calls, reasoning fields, cost |
-| MCP | real server over a real pipe: handshake, discovery, errors, reconnection |
-| Agent | the loop, budgets, cancellation, persistence, local tools |
-| 3D | request construction, envelope unwrapping, status mapping, polling, download |
-| Benchmark | isolation, metrics, storage, the absence of a verdict |
+| LLM | request shape per provider, streaming, tool calls, reasoning fields, image parts, cost |
+| MCP | real server over a real pipe: handshake, discovery, errors, reconnection, reading an image a tool left on disk |
+| Agent | the loop, budgets, cancellation, persistence, local tools, the `execute_python` gate |
+| 3D | request construction, envelope unwrapping, status mapping, polling, download, import, credits |
+| Tasks | stored as they start and as they settle, restored by the panel, one row per task |
+| Projects | listing, filing turns under one, reopening the transcript, cascade on delete |
+| Benchmark | isolation, metrics, storage, the absence of a verdict, the headless command |
 | Storage | migrations, foreign keys, concurrency, secrets |
-| GUI | panels, the transcript, and one full run through the window, offscreen |
+| GUI | panels, the transcript, a render in a tool card, and full runs through the window, offscreen |
 
-The bugs these found are in the commit messages. Several were user-visible: a
-tool result's error code parsed from the wrong brace, a bridge address that never
-reached the `blender-mcp` child process, a request that breached its budget going
-unrecorded, a Qt signal dropped because it was emitted from a plain thread.
+The bugs these found are in the commit messages, and the live runs found more that
+unit tests cannot: a render nobody could read across a filesystem, a settings save
+that deleted every other MCP server, a switch that controlled nothing, and credits
+recorded only on the way to a green result.
+
+`examples/live_run.py` is the other half: seven sections against a real Blender, a
+real model and a real 3D provider, each answering something only a live run can.
+
+```bash
+python examples/live_run.py \
+    --blender-mcp ../blender-mcp --python python3 --port 8767 \
+    --provider localqwen --provider-spec localqwen:local-qwen \
+    --base-url http://127.0.0.1:11400/v1 --allow-execute-python
+```
 
 ## Roadmap
 
@@ -427,14 +469,15 @@ unrecorded, a Qt signal dropped because it was emitted from a plain thread.
 - [x] Tripo: text→3D, image→3D, polling, download
 - [x] Cost tracking, budgets, cancellation
 - [x] Benchmark with isolated runs and manual review
-- [x] Chat, Scene, Tasks, Benchmark, Models, Settings
-- [ ] Vision loop: render, look, correct. The pieces exist — `render_preview`
-  returns an image, models declare `supports_vision` — but nothing closes the loop
+- [x] Chat, Scene, Tasks, Projects, Benchmark, Models, Settings
+- [x] Vision loop: render, read it across the filesystem, send it, act on it
+- [x] Projects: named work with a starting `.blend`, and turns filed under it
+- [x] Tasks that outlive the window: stored, and restored on the next launch
+- [x] Multiple MCP servers, editable by name in the window
 - [ ] `blender.import_asset`, so a generated asset lands in the scene without
   `execute_python` — the importer prefers it the moment it exists
 - [ ] More 3D providers behind the same interface
-- [ ] Multiple MCP servers in the UI (the manager already merges them)
-- [ ] Project files with a starting `.blend`, so a project reopens where it was
+- [ ] Project files: a project remembers its scene, but does not yet save one
 
 ## Licence
 

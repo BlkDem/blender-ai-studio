@@ -112,6 +112,17 @@ async def run(options: argparse.Namespace) -> int:
     shot.parent.mkdir(parents=True, exist_ok=True)
     window.grab().save(str(shot))
     print(f"screenshot: {shot} ({shot.stat().st_size} bytes)", flush=True)
+
+    # One shot of each page the run touched, so the panels are seen doing their
+    # job rather than described.
+    for index, name in enumerate(("Chat", "Scene", "Tasks", "Projects", "Benchmark")):
+        window.pages.setCurrentIndex(index)
+        pump(0.3)
+        page = shot.with_name(f"{shot.stem}-{name.lower()}{shot.suffix}")
+        window.grab().save(str(page))
+        print(f"  {name}: {page}", flush=True)
+    window.pages.setCurrentIndex(0)
+    pump(0.2)
     print("--- transcript ---", flush=True)
     print(window.chat.transcript_text(), flush=True)
     print("--- footer:", window.cost_status.text(), flush=True)

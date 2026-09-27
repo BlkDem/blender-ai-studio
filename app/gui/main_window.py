@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self._active_agent: Any = None
         self._agent: Any = None
         self._agent_provider = ""
+        self._agent_gate: bool | None = None
         self._conversation_id = ""
         self._cards_by_tool: dict[str, str] = {}
         self._benchmarks = BenchmarkStorage(context.studio.db) if context.studio else None
@@ -362,6 +363,8 @@ class MainWindow(QMainWindow):
         self.core.submit(self._run_agent(text), self._run_finished)
 
     def _agent_for_turn(self) -> Any:
+        # The gate is read at agent construction, so a change in Settings has to
+        # make the next turn build a new agent.
         """One agent per conversation, not one per turn.
 
         A new agent every turn meant a new conversation every turn: the model was
@@ -369,11 +372,13 @@ class MainWindow(QMainWindow):
         which is worse than an obvious break -- the user reads a memory that is
         not there.
         """
-        if self._agent is None or self._agent_provider != self.current_provider():
+        gate = self.context.settings.agent.allow_execute_python
+        if self._agent is None or self._agent_provider != self.current_provider() or self._agent_gate != gate:
             self._agent = self.context.agent(
                 self.current_provider(), self.current_model(), conversation_id=self._conversation_id
             )
             self._agent_provider = self.current_provider()
+            self._agent_gate = gate
         return self._agent
 
     async def _run_agent(self, text: str) -> Any:

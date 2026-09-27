@@ -12,7 +12,7 @@ from __future__ import annotations
 import base64
 import json
 
-from app.core.agent import Agent
+from app.core.agent import Agent, RunResult
 from app.core.events import EventBus, EventType
 from app.llm.base import ChatRequest, ChatResponse, ContentPart, Message, Role, ToolCall, Usage
 from app.llm.models import ModelInfo
@@ -191,3 +191,70 @@ def test_the_anthropic_wire_puts_a_render_inside_the_tool_result() -> None:
     blocks = result_block["content"]
     assert blocks[0] == {"type": "text", "text": "rendered in 2.1s"}
     assert blocks[1]["type"] == "image"
+
+
+async def test_a_switched_off_tool_is_not_offered() -> None:
+    """The server may have the gate open; the studio's switch is the last word.
+
+    Without this the checkbox in Settings controlled nothing, and a server
+    started with execution enabled could not be closed from the app -- a switch
+    that reads as a promise and is not one.
+    """
+    provider = SeesImages(turns=[ScriptedTurn(text="fine")], model="test-model")
+    agent = Agent(
+        provider,
+        "test-model",
+        PictureMCP(),  # type: ignore[arg-type]
+        bus=EventBus(),
+        stream=False,
+        model_info=ModelInfo(id="test-model", provider="test"),
+        allow_execute_python=False,
+    )
+    assert "blender.execute_python" not in [t.name for t in agent.tools()]
+
+
+async def test_a_switched_off_tool_is_refused_with_a_reason() -> None:
+    provider = SeesImages(turns=[ScriptedTurn(text="fine")], model="test-model")
+    agent = Agent(
+        provider,
+        "test-model",
+        PictureMCP(),  # type: ignore[arg-type]
+        bus=EventBus(),
+        stream=False,
+        model_info=ModelInfo(id="test-model", provider="test"),
+        allow_execute_python=False,
+    )
+    outcome = await agent._run_tool(  # noqa: SLF001
+        "r", ToolCall.new("blender.execute_python", {"code": "result = 1"}), RunResult(run_id="r")
+    )
+    assert outcome.is_error
+    assert outcome.error_code == "TOOL_DISABLED"
+    assert "allow blender.execute_python" in outcome.content, "and it says which switch to press"
+
+
+async def test_the_tool_is_offered_when_the_switch_is_on() -> None:
+    class WithPython(PictureMCP):
+        def tools(self):  # type: ignore[override]
+            found = super().tools()
+            from app.mcp.models import ToolDescriptor
+
+            found["blender.execute_python"] = ToolDescriptor(
+                name="blender.execute_python", description="Run Python"
+            )
+            return found
+
+    provider = SeesImages(turns=[ScriptedTurn(text="fine")], model="test-model")
+    agent = Agent(
+        provider,
+        "test-model",
+        WithPython(),
+        bus=EventBus(),
+        stream=False,
+        model_info=ModelInfo(id="test-model", provider="test"),
+        allow_execute_python=True,
+    )
+    assert "blender.execute_python" in [t.name for t in agent.tools()]
+    outcome = await agent._run_tool(  # noqa: SLF001
+        "r", ToolCall.new("blender.execute_python", {"code": "result = 1"}), RunResult(run_id="r")
+    )
+    assert not outcome.is_error

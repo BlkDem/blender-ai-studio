@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from app.core.context import three_d_tool
+from app.core.errors import ThreeDError
 from app.core.events import Event, EventBus, EventType
 from app.core.settings import ThreeDConfig
 from app.core.task_manager import TaskManager
@@ -57,13 +58,14 @@ class ImportMCP:
 
 
 class Watcher:
-    """Collects what the Tasks panel would have seen."""
+    """Collects what the Tasks panel would have seen, and what was stored."""
 
-    def __init__(self) -> None:
+    def __init__(self, studio: object | None = None) -> None:
         self.bus = EventBus()
         self.events: list[Event] = []
         self.bus.subscribe(self.events.append)
-        self.tasks = TaskManager(self.bus)
+        self.tasks = TaskManager(self.bus, studio=studio)
+        self.stored: list = []
 
     def types(self) -> list[EventType]:
         return [event.type for event in self.events]
@@ -230,3 +232,41 @@ async def test_an_empty_prompt_is_refused_before_any_request(prompt: str) -> Non
     answer = await tool.handler({"prompt": prompt})
     assert "prompt is required" in answer["error"]
     assert provider.requests == [], "nothing was submitted"
+
+
+async def test_the_credits_are_recorded_even_when_the_import_fails(tmp_path: Path) -> None:
+    """The money is spent when the model is generated, not when it is imported.
+
+    Recording the cost only on the way to a green result loses the bill for
+    exactly the run a person wants to know what it cost: the one that failed
+    after the provider had already done the expensive part.
+    """
+    from app.storage.repositories import Studio
+
+    studio = await Studio.open(tmp_path / "studio.db")
+
+    async def refuse(task, path):
+        raise ThreeDError("Blender cannot import an asset yet", hint="enable execute_python")
+
+    watcher = Watcher(studio=studio)
+    tool = three_d_tool(
+        registry_with(MockThreeDProvider(credits=100)),
+        ThreeDConfig(provider="mock-3d", poll_interval=0.01),
+        tasks=watcher.tasks,
+        on_ready=refuse,
+        download_dir=tmp_path,
+    )
+    answer = await tool.handler({"prompt": "a dragon"})
+    # tasks.wait(), not a poll on the state: the record is written before the
+    # task is done, and a test that watches the state can read the row first.
+    finished = await watcher.tasks.wait(answer["studio_task_id"], timeout=5)
+
+    assert finished.state == "failed"
+    assert finished.credits == 100, "the cost of a run that failed afterwards is still a cost"
+    stored = [record for record in await studio.three_d.list() if record.prompt == "a dragon"]
+    assert stored and stored[0].credits == 100
+    assert stored[0].status == "failed"
+    assert "execute_python" in (stored[0].error or ""), (
+        f"with the reason the panel shows: {stored[0].error!r}"
+    )
+    studio.close()

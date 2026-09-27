@@ -193,6 +193,7 @@ class AppContext:
             stream=stream,
             studio=self.studio,
             conversation_id=conversation_id,
+            allow_execute_python=self.settings.agent.allow_execute_python,
             project_id=project_id if project_id is not None else self.current_project,
         )
 
@@ -385,6 +386,10 @@ def _finish_asset(
             raise ThreeDError(finished.error or "the provider reported a failure")
         if not finished.status.terminal:
             raise ThreeDError(finished.error or "the generation never finished")
+        # The credits are spent whether or not the import works. Recording them
+        # only at the end loses the bill for a run whose download or import
+        # failed -- which is exactly the run a person needs to see the cost of.
+        studio_task.credits = finished.credits
         destination = (download_dir or Path(".")) / f"{finished.provider_task_id or finished.id}.glb"
         studio_task.detail = "downloading"
         path = await provider.download(finished, destination)
@@ -394,7 +399,6 @@ def _finish_asset(
             return {"path": str(path), "imported": False}
         report = await on_ready(finished, path)
         studio_task.detail = f"{len(report.imported)} object(s) in the scene"
-        studio_task.credits = finished.credits
         return {"path": str(path), "imported": True, "objects": report.imported}
 
     return work

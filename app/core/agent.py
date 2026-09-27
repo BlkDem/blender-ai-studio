@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.cost import Budget, CostTotals, CostTracker
-from app.core.errors import AgentError, BudgetExceeded, MCPError, StudioError
+from app.core.errors import AgentError, BudgetExceeded, MCPError
 from app.core.events import Event, EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
@@ -106,6 +106,21 @@ class RunResult:
         return [call.call.name for call in self.tool_calls]
 
 
+#: How the studio spells the tool whose gate it controls itself.
+EXECUTE_PYTHON_SUFFIX = ".execute_python"
+
+
+def _fetch_image(bridge: MCPManager, text: str) -> tuple[str, str] | None:
+    """The picture a tool result points at, read off the filesystem.
+
+    A plain function so the agent can hand it to an executor: reading a file
+    blocks, and the core thread is where every other tool call is waiting.
+    """
+    from app.mcp.images import fetch
+
+    return fetch(bridge, text)
+
+
 class Agent:
     """Runs one conversation turn, with tools, under a budget."""
 
@@ -127,6 +142,7 @@ class Agent:
         studio: Any = None,
         conversation_id: str = "",
         project_id: str | None = None,
+        allow_execute_python: bool = False,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -149,6 +165,7 @@ class Agent:
         self.studio = studio
         self.conversation_id = conversation_id
         self.project_id = project_id
+        self.allow_execute_python = allow_execute_python
         self._runs: dict[str, asyncio.Task[Any]] = {}
         #: Whether a transaction this agent opened is still open. Tracked here
         #: rather than asked of the add-on, because the agent began every
@@ -160,11 +177,31 @@ class Agent:
     # --- tools -------------------------------------------------------------
 
     def tools(self) -> list[ToolSpec]:
-        """MCP tools and the studio's own, in one list for the model."""
-        specs = list(self.mcp.tool_specs())
+        """MCP tools and the studio's own, in one list for the model.
+
+        ``blender.execute_python`` is withheld unless the studio's own switch is
+        on. The server also has a gate, but a server started with it open cannot
+        be closed from here -- and a switch in a settings panel that controls
+        nothing is worse than no switch, because it is read as a promise.
+        """
+        specs = [
+            spec
+            for spec in self.mcp.tool_specs()
+            if not spec.name.endswith(EXECUTE_PYTHON_SUFFIX) or self.allow_execute_python
+        ]
         known = {spec.name for spec in specs}
         specs.extend(tool.spec() for tool in self.local_tools if tool.name not in known)
         return specs
+
+    def refuses(self, name: str) -> bool:
+        """Whether a tool the model asked for is one the studio will not run."""
+        if not name.endswith(EXECUTE_PYTHON_SUFFIX):
+            return False
+        if self.allow_execute_python:
+            return False
+        from app.providers3d.importer import FUTURE_IMPORT_TOOL
+
+        return FUTURE_IMPORT_TOOL not in self.mcp.tools()
 
     def _local_tool(self, name: str) -> LocalTool | None:
         return next((tool for tool in self.local_tools if tool.name == name), None)
@@ -405,6 +442,28 @@ class Agent:
         self._publish(
             run_id, EventType.TOOL_STARTED, tool=call.name, call_id=call.id, arguments=call.arguments
         )
+        if self.refuses(call.name):
+            # Not a tool error the model should retry: it is the studio saying no,
+            # and saying why is more useful than a validation error from the server.
+            from app.core.errors import StudioError
+
+            refusal = StudioError(
+                f"{call.name} is switched off in this studio",
+                hint="Settings -> Agent -> allow blender.execute_python",
+            )
+            refusal.code = "TOOL_DISABLED"
+            refusal_text = refusal.user_text()
+            self._publish(
+                run_id,
+                EventType.TOOL_FAILED,
+                tool=call.name,
+                call_id=call.id,
+                is_error=True,
+                text=refusal_text,
+                images=0,
+                duration_ms=0.0,
+            )
+            return ToolResult(call=call, content=refusal_text, is_error=True, error_code="TOOL_DISABLED")
         local = self._local_tool(call.name)
         error_code = ""
         # A local tool hands back bare image payloads; only an MCP one knows
@@ -419,6 +478,16 @@ class Agent:
                 outcome_text = outcome.text
                 images = outcome.images
                 mime_types = outcome.image_mime_types
+                if not images:
+                    # A render answers with a path, not with bytes, and the path is
+                    # on Blender's side of the filesystem. Reading it here is what
+                    # makes "the model can see its render" true rather than
+                    # aspirational.
+                    found = await asyncio.get_running_loop().run_in_executor(
+                        None, _fetch_image, self.mcp, outcome_text
+                    )
+                    if found is not None:
+                        images, mime_types = [found[0]], [found[1]]
                 is_error = outcome.is_error
                 error_code = outcome.error_code
                 credits = usd = 0.0
