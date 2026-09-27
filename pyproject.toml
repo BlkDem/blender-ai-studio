@@ -1,0 +1,48 @@
+[project]
+name = "blender-ai-studio"
+version = "0.1.0"
+description = "A desktop AI client that drives Blender through the blender-mcp MCP server"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "mcp>=2,<3",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "httpx>=0.27",
+    "PySide6-Essentials>=6.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "anyio>=4", "trio>=0.26"]
+keyring = ["keyring>=24"]
+
+[project.scripts]
+blender-ai-studio = "app.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning:app.*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W", "C4", "SIM"]
+ignore = ["B008", "E501"]
+
+[tool.mypy]
+python_version = "3.11"
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["^\\.venv/"]
