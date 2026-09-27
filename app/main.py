@@ -23,6 +23,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from app.core.context import AppContext, setup_logging
 from app.core.errors import ConfigurationError, StudioError
@@ -45,6 +46,24 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--provider", default="", help="provider to use for --prompt")
     parser.add_argument("--model", default="", help="model id for --prompt")
     parser.add_argument("--list-tools", action="store_true", help="print the MCP tools and exit")
+    parser.add_argument(
+        "--benchmark",
+        metavar="PROVIDER:MODEL,PROVIDER:MODEL",
+        default="",
+        help="run each model against each prompt and print the comparison",
+    )
+    parser.add_argument(
+        "--prompts",
+        type=Path,
+        default=None,
+        help="a file of prompts, one per line, for --benchmark (repeat --prompt too)",
+    )
+    parser.add_argument(
+        "--blend",
+        type=Path,
+        default=None,
+        help="a .blend to start each benchmark run from, so the runs are comparable",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--data-dir", type=Path, help="override the data directory")
     parser.add_argument("--log-level", default="", help="DEBUG, INFO, WARNING, ERROR")
@@ -203,6 +222,7 @@ async def check(context: AppContext, *, as_json: bool) -> int:
 
 async def list_tools(context: AppContext, *, as_json: bool) -> int:
     assert context.mcp is not None
+    assert context.llm is not None
     await context.mcp.connect_all()
     catalog = context.mcp.tools()
     if as_json:
@@ -239,6 +259,7 @@ async def run_prompt(context: AppContext, text: str, provider: str, model: str, 
         )
 
     assert context.mcp is not None
+    assert context.llm is not None
     await context.mcp.connect_all()
     if not context.mcp.any_connected():
         print("No MCP server is connected; start Blender with the add-on attached.", file=sys.stderr)
@@ -289,6 +310,102 @@ def _on_path(command: str) -> bool:
     return shutil.which(command) is not None
 
 
+async def run_benchmark(context: AppContext, options: argparse.Namespace) -> int:
+    """Every model against every prompt, in order, and one table at the end.
+
+    Headless, because that is where a comparison belongs: it has to be
+    repeatable, and a window is a bad place to keep the record of a thing whose
+    whole purpose is being comparable next time.
+    """
+    from app.benchmark.runner import BenchmarkRunner, BenchmarkTask, ModelSpec
+    from app.benchmark.storage import BenchmarkStorage
+
+    specs = [
+        ModelSpec(
+            provider=item.split(":", 1)[0].strip(), model=item.split(":", 1)[1].strip() if ":" in item else ""
+        )
+        for item in options.benchmark.split(",")
+        if item.strip()
+    ]
+    if not specs:
+        print("--benchmark needs at least one provider:model.", file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    prompts = [options.prompt] if options.prompt else []
+    if options.prompts:
+        prompts += [
+            line.strip()
+            for line in options.prompts.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+    if not prompts:
+        print("--benchmark needs prompts: --prompt, --prompts, or both.", file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    assert context.mcp is not None
+    assert context.llm is not None
+    await context.mcp.connect_all()
+    if not context.mcp.any_connected():
+        print("No MCP server is connected; start Blender with the add-on attached.", file=sys.stderr)
+        return EXIT_NOT_CONFIGURED
+
+    tasks = [BenchmarkTask(prompt=prompt) for prompt in prompts]
+    storage = BenchmarkStorage(context.studio.db) if context.studio else None
+    suite_id = ""
+    run_ids: list[str] = []
+
+    async def persist(comparison: Any, outcome: Any) -> None:
+        if storage is not None and suite_id:
+            run_ids.append(await storage.save_run(suite_id, outcome, task_index=len(run_ids)))
+
+    if storage is not None:
+        suite_id = await storage.create_suite(
+            name=f"{len(specs)} model(s) x {len(tasks)} task(s)",
+            description=", ".join(spec.label() for spec in specs),
+        )
+
+    runner = BenchmarkRunner(
+        context.llm,
+        context.mcp,
+        bus=context.bus,
+        system_prompt=context.settings.agent.system_prompt,
+    )
+    comparison = await runner.run_suite(tasks, specs, blend=options.blend, persist=persist)
+
+    if options.json:
+        print(
+            json.dumps(
+                {
+                    "suite_id": suite_id,
+                    "run_ids": run_ids,
+                    "columns": comparison.columns(),
+                    "rows": [
+                        outcome.row() | {"id": run}
+                        for outcome, run in zip(comparison.outcomes, run_ids, strict=False)
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        print()
+        print(
+            f"{'Model':<28} {'Status':<10} {'Time':>7} {'Tokens':>8} {'Cost':>9} {'Calls':>6} {'Errors':>7}"
+        )
+        for outcome, run in zip(comparison.outcomes, run_ids, strict=False):
+            totals = outcome.totals
+            print(
+                f"{outcome.model.label():<28} {outcome.status:<10} {outcome.duration_s:>6.1f}s "
+                f"{totals.tokens:>8} ${totals.total_usd:>8.4f} {outcome.mcp_calls:>6} {outcome.tool_errors:>7}"
+                + (f"  {run}" if run else "")
+            )
+        print()
+        print("No model is ranked above another here. Score the runs by hand:")
+        print(f"  {suite_id or '(not saved)'}")
+    failed = [outcome for outcome in comparison.outcomes if outcome.status not in ("ok", "verified")]
+    return EXIT_FAILED if failed else EXIT_OK
+
+
 async def amain(options: argparse.Namespace) -> int:
     settings = build_settings(options)
     setup_logging(options.log_level or settings.log_level)
@@ -302,6 +419,8 @@ async def amain(options: argparse.Namespace) -> int:
             return await check(context, as_json=options.json)
         if options.list_tools:
             return await list_tools(context, as_json=options.json)
+        if options.benchmark:
+            return await run_benchmark(context, options)
         if options.prompt:
             return await run_prompt(
                 context, options.prompt, options.provider, options.model, as_json=options.json
@@ -322,12 +441,13 @@ async def amain(options: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     options = arguments(argv)
-    if not os.environ.get("QT_QPA_PLATFORM") and sys.platform.startswith("linux") and not options.check:
+    headless = options.check or options.prompt or options.benchmark or options.list_tools
+    if not os.environ.get("QT_QPA_PLATFORM") and sys.platform.startswith("linux") and not headless:
         # A desktop app on a machine with no display should say so once, clearly,
         # rather than dumping a Qt plugin error.
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             print(
-                "No display found. Use --check, --prompt or --list-tools for headless runs.",
+                "No display found. Use --check, --prompt, --benchmark or --list-tools for headless runs.",
                 file=sys.stderr,
             )
             return EXIT_NOT_CONFIGURED

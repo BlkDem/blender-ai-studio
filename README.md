@@ -196,7 +196,7 @@ The layering rules that keep it true:
 
 ```text
 app/
-├── main.py            --check, --prompt, --list-tools, or the window
+├── main.py            --check, --prompt, --benchmark, --list-tools, or the window
 ├── core/              agent, events, cost, settings, task manager, context
 ├── llm/               base (the conversation format), models, registry, providers/
 ├── mcp/               client (one server), manager (all of them), models
@@ -278,6 +278,22 @@ calls, credits, the final scene, and the transcript. Scores are a person's:
 geometry, materials, instruction following, composition, overall, and notes.
 There is no automatic winner anywhere in this project — a heuristic that crowned
 a best model would be a claim about taste dressed as a metric.
+
+A comparison belongs somewhere repeatable, so it runs headless:
+
+```bash
+.venv/bin/python -m app.main \
+    --benchmark "qwen3b:local-qwen,qwen15b:local-qwen15" \
+    --prompt "How many objects are in the scene? Use blender.get_objects." \
+    --blend ~/scenes/room.blend
+```
+
+Several models, several prompts (`--prompt` repeated, or `--prompts file.txt`),
+one run each, sequential — two models driving one Blender at once would
+interleave their tool calls and the scenes would belong to neither. Each run is
+saved as it finishes, so a comparison stopped half-way is still a record, and the
+id printed next to each row is the one a review attaches to. The window has the
+same panel; the command is the repeatable half of it.
 
 ## Costs and limits
 
