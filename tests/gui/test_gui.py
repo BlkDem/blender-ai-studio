@@ -38,6 +38,8 @@ from app.gui.settings.panel import SettingsPanel  # noqa: E402
 from app.gui.tasks.panel import TasksPanel  # noqa: E402
 from app.llm.providers.mock import MockLLMProvider, ScriptedTurn  # noqa: E402
 
+pytestmark = pytest.mark.gui
+
 
 @pytest.fixture(scope="session")
 def qapp() -> QApplication:

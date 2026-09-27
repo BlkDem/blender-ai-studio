@@ -31,6 +31,7 @@ packages = ["app"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:app.*"]
+markers = ["gui: needs a Qt platform; QT_QPA_PLATFORM=offscreen is set by the test"]
 
 [tool.ruff]
 line-length = 110

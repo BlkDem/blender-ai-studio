@@ -1,0 +1,365 @@
+# Blender AI Studio
+
+A desktop client for driving Blender with an AI model. You write a sentence, the
+model decides which tools to call, and Blender changes. The model is a setting:
+GPT, Claude, Gemini, Space Bunny, JEV, or anything that speaks the OpenAI wire
+format, including one you run yourself.
+
+The studio does not talk to Blender. It speaks MCP to
+[`blender-mcp`](../blender-mcp), which does, and the tool list it works from is
+whatever that server publishes — there is no `blender.create_object` written
+anywhere in this project.
+
+```text
+you:  Create a table with four legs.
+
+LLM           decides: get_scene, then create objects
+agent         runs the tools, reads each result, corrects if needed
+MCP client    stdio -> blender-mcp
+blender-mcp   WebSocket -> a running Blender
+you:          watch the tool cards appear, and the viewport change
+```
+
+## Contents
+
+1. [Install](#install)
+2. [Connect Blender](#connect-blender)
+3. [Connect a model](#connect-a-model)
+4. [Your first task](#your-first-task)
+5. [What it looks like](#what-it-looks-like)
+6. [Architecture](#architecture)
+7. [The panels](#the-panels)
+8. [3D generation](#3d-generation)
+9. [Benchmark](#benchmark)
+10. [Costs and limits](#costs-and-limits)
+11. [Configuration](#configuration)
+12. [Development](#development)
+13. [Testing](#testing)
+14. [Roadmap](#roadmap)
+
+## Install
+
+Python 3.11 or newer. The studio does not touch your Blender installation and does
+not write into your `blender-mcp` checkout.
+
+```bash
+cd blender-ai-studio
+python3.11 -m venv .venv && .venv/bin/python -m pip install -e ".[dev]"
+```
+
+`PySide6-Essentials` is enough for the window; a system keyring is used for API
+keys when `pip install ".[keyring]"` finds one.
+
+Check the install before starting Blender:
+
+```bash
+.venv/bin/python -m app.main --check
+```
+
+## Connect Blender
+
+`blender-mcp` runs as a child process over stdio, and its own bridge listens for
+the Blender add-on. Point the studio at your checkout in the GUI
+(**Settings → Blender**), or in the environment:
+
+```bash
+export STUDIO_MCP_SERVERS='[{
+  "name": "Blender MCP",
+  "command": "/usr/bin/python3.11",
+  "args": ["-m", "server.main"],
+  "cwd": "/path/to/blender-mcp",
+  "env": {"PYTHONPATH": "/path/to/blender-mcp"},
+  "blender_port": 8765
+}]'
+```
+
+Then start Blender with the add-on enabled and press **Connect** in the Blender MCP
+sidebar. The add-on reconnects on its own, so you can start it either way round.
+The studio waits for it: a Blender that has not attached yet is not the same as
+one that is not there.
+
+## Connect a model
+
+**Settings → Models** (or the Models panel) takes a provider, a base URL and a
+key. A model is a row of metadata — capabilities and prices — so a model the
+studio has never heard of is a row, not a code change:
+
+```json
+{
+  "id": "space-bunny-free",
+  "display_name": "Space Bunny",
+  "supports_tools": true,
+  "supports_vision": false,
+  "context_window": 128000,
+  "input_price": 0,
+  "output_price": 0
+}
+```
+
+The **OpenAI-compatible** provider is the one to reach for first: it is OpenAI
+itself, and also any gateway, vLLM or Ollama that copies the wire format. Enter
+the base URL and the model id, and the studio talks to it.
+
+Keys go to the system keyring when there is one, otherwise to a `0600` file in
+the data directory. They are never written to a project, never logged, never sent
+to a model, and never included in a benchmark log.
+
+## Your first task
+
+Start Blender, connect the add-on, pick a model, and type:
+
+```text
+Create a cube named TestCube at location 2, 0, 1.
+```
+
+You will see the tool call as a card in the transcript, with its arguments, how
+long it took and whether it worked. A second call verifies it:
+
+```text
+tool: ✓ blender.create_object · 41 ms
+tool: ✓ blender.get_object · 3 ms
+     cube TestCube at [2.0, 0.0, 1.0]
+```
+
+To do the same without a window:
+
+```bash
+.venv/bin/python -m app.main --prompt "Create a cube named TestCube at location 2, 0, 1."
+```
+
+## What it looks like
+
+Six panels on the left, a transcript on the right, and a status line that always
+answers three questions: is Blender attached, is the model ready, is 3D ready.
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│ Blender AI Studio    ● Blender            Model: space-bunny ▾  │
+├──────────┬─────────────────────────────────────────────────────┤
+│ Chat     │  user: Create a table with four legs.               │
+│ Scene    │                                                     │
+│ Tasks    │  assistant: I'll build it from primitives.           │
+│ Benchmark│                                                     │
+│ Models   │  🔧 blender.get_scene            ✓ 124 objects 8ms │
+│ Settings │  🔧 blender.create_object        ✓ TableTop 41ms     │
+│          │  🔧 blender.update_object        ✓ location 12ms     │
+│          │                                                     │
+│          │  Built a table: a top at 0.75 m and four legs.      │
+│          │  3 tool calls · 1 204 tokens · $0.0041 · 8.2s       │
+├──────────┴─────────────────────────────────────────────────────┤
+│ MCP: connected · 15 tools    LLM: space-bunny    3D: tripo      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+A tool call is visually separate from prose, because watching the model work is
+one of the point of the thing.
+
+## Architecture
+
+```text
+                       Blender AI Studio
+                              │
+                  ┌───────────┴───────────┐
+                  │      GUI (PySide6)    │  Chat, Scene, Tasks,
+                  │   queue + drain timer │  Benchmark, Models, Settings
+                  └───────────┬───────────┘
+                              │ coroutines
+                       AI Agent ──────────── TaskManager
+                       │    │    │
+              LLM       │  3D     │  MCP client (stdio)
+              │         │         │        │
+       OpenAI-compatible  │    blender-mcp (its own process)
+       Anthropic          │         │  WebSocket
+       Gemini        Tripo 3D        │
+       Mock                   └──── Blender
+```
+
+Four abstractions carry the whole design, and the rules around them are short:
+
+| | |
+|---|---|
+| `LLMProvider` | `chat`, `stream`, `models`, `close`. Nothing above it sees a vendor shape. |
+| `MCPManager` | `connect`, `tools`, `call_tool`, `read_resource`. Nothing above it names a Blender tool. |
+| `ThreeDProvider` | `create`, `status`, `download`, `wait_for`. Tripo is one implementation. |
+| `Agent` | asks a model, runs what it asked for, stops under a budget. |
+
+The layering rules that keep it true:
+
+- **The GUI never blocks.** Every network call is a coroutine on the core thread;
+  results come back as queued Qt signals.
+- **The core never imports Qt.** `--check`, the acceptance run and the tests drive
+  the same application the window does.
+- **No model is special-cased.** There is no `if model == "space-bunny"` in this
+  project. Capabilities are metadata; prices are metadata.
+- **Secrets are not settings.** They live in the keyring or a `0600` file, and
+  the in-memory cache refuses to print itself.
+
+```text
+app/
+├── main.py            --check, --prompt, --list-tools, or the window
+├── core/              agent, events, cost, settings, task manager, context
+├── llm/               base (the conversation format), models, registry, providers/
+├── mcp/               client (one server), manager (all of them), models
+├── providers3d/       base, registry, tripo, mock
+├── benchmark/         runner, storage, models
+├── storage/           database, migrations, repositories, secrets
+└── gui/               bridge, main_window, chat/, scene/, tasks/, models/, benchmark/, settings/
+```
+
+## The panels
+
+| Panel | What it is for |
+|---|---|
+| **Chat** | The conversation, streamed, with a card per tool call: arguments, duration, success, images. Stop any time. |
+| **Scene** | What Blender is showing — connection, scene, object count, active object, camera, engine, frame — read over MCP like everything else. |
+| **Tasks** | Background work: provider, status, progress, duration, credits, cost. Cancel from here. |
+| **Benchmark** | Build a suite, run it, read the table, score the results yourself. |
+| **Models** | Providers, keys, capabilities, and the model selector's contents. |
+| **Settings** | Blender's server, the agent's limits, and the budgets. |
+
+## 3D generation
+
+The agent has one tool of its own, `generate_3d_asset`, and it is offered only
+when a 3D provider is enabled *and* has a key — a tool that always fails teaches
+a model that the tool is noise.
+
+```text
+you:      Create a medieval wooden chest.
+agent:    generate_3d_asset {"prompt": "medieval wooden chest", "texture": true}
+tasks:    Tripo generation · queued · est. 100 credits
+you:      …later
+tasks:    succeeded · 100 credits · ~/.local/share/blender-ai-studio/assets/chest.glb
+```
+
+Tripo is implemented against the real v3 API: submit, poll, download. Its
+`code`/`data` envelope and its `success`/`banned` statuses are translated inside
+the provider, so nothing above it knows they exist. `banned` in particular is
+reported as "Tripo refused this prompt under its content policy", because that
+is the user's prompt to fix rather than a failure to retry.
+
+A generated asset is **not** in the scene yet. Importing it needs
+`blender.execute_python`, which is off by default; when it is off, the studio
+says so instead of pretending. The extension point for a future
+`blender.import_asset` MCP tool is the same place, and adding it there would not
+touch the agent.
+
+## Benchmark
+
+The point of a benchmark here is that runs are *comparable*, so every run gets
+its own copy of the starting `.blend` and the table carries a **Scene reset**
+column: `verified` (the file was opened), `copy_only` (a copy was staged; open it
+yourself) or `unverified`. A comparison that mixes them is not a comparison, and
+the table says so at the bottom.
+
+```text
+Model           Status      Time      Tokens   Cost      Tools  Errors  Scene reset
+a-model @ gpt   ok          18.4s     3 210     $0.0121   7      0       verified
+b-model @ claude ok        24.1s     4 880     $0.0187   9      1       verified
+
+2 run(s); 2 with a verified starting scene. Scores are yours — the studio does not rank models.
+```
+
+Metrics stored per run: duration, tokens, cost, MCP calls, tool errors, 3D
+calls, credits, the final scene, and the transcript. Scores are a person's:
+geometry, materials, instruction following, composition, overall, and notes.
+There is no automatic winner anywhere in this project — a heuristic that crowned
+a best model would be a claim about taste dressed as a metric.
+
+## Costs and limits
+
+Two currencies, tracked apart from the first line of code: token bills and 3D
+credits are both "cost" and neither is the other, so a benchmark table sums them
+only where both are real money, and always shows the split.
+
+| Limit | Default | What it stops |
+|---|---|---|
+| `agent.max_steps` | 30 | a model that keeps asking the same thing |
+| `agent.max_tool_calls` | 50 | checked per call, so six tools in one turn stop at the fifth |
+| `agent.max_seconds` | 900 | a run that cannot end |
+| `agent.max_request_cost` | $2 | one enormous response |
+| `agent.max_session_cost` | $5 | a long conversation |
+| `agent.max_3d_credits` | 200 | a plan that would spend real credits |
+| `agent.allow_execute_python` | off | the one tool that can do anything |
+
+A run that reaches a limit stops with a reason in the transcript and a
+`RUN_FAILED` event, and the usage that was already spent is still recorded — a
+cost report that omits the expensive request is the one report that cannot be
+trusted.
+
+## Configuration
+
+Defaults, then `.env`/environment (`STUDIO_*`), then the database where the GUI
+writes what you changed. Dotted keys, so changing one number does not rewrite its
+neighbours.
+
+| Variable | Meaning |
+|---|---|
+| `STUDIO_DATA_DIR` | database, secrets and settings live here |
+| `STUDIO_MCP_SERVERS` | the MCP servers, as JSON |
+| `STUDIO_LLM_PROVIDERS` | providers, models and prices, as JSON |
+| `STUDIO_THREE_D__PROVIDER` | which 3D provider |
+| `STUDIO_AGENT__MAX_STEPS` | one of the limits above |
+| `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | fallbacks for headless runs |
+| `STUDIO_LOG_LEVEL` | `DEBUG` for a full transcript of every request |
+
+See `.env.example`. Secrets do not belong in it: put keys in the GUI, or in the
+environment for a headless run.
+
+## Development
+
+```bash
+.venv/bin/python -m pytest                 # everything
+.venv/bin/python -m pytest -m "not gui"    # without a display
+.venv/bin/python -m app.main --check       # configuration, live
+.venv/bin/python -m app.main --list-tools  # what the MCP server publishes
+```
+
+The live acceptance run — a real agent, a real MCP server, a real Blender:
+
+```bash
+.venv/bin/python examples/acceptance_run.py \
+    --blender-mcp /path/to/blender-mcp --python /path/to/python
+```
+
+It creates a cube at 2,0,1, moves it to 3,3,1, and verifies both with second
+tool calls. With no API key it drives a scripted planner, so everything except a
+model's judgement is exercised; with `--provider` it uses a real model.
+
+## Testing
+
+209 tests, no network and no Blender needed for the majority.
+
+| Area | What is covered |
+|---|---|
+| LLM | request shape per provider, streaming, tool calls, reasoning fields, cost |
+| MCP | real server over a real pipe: handshake, discovery, errors, reconnection |
+| Agent | the loop, budgets, cancellation, persistence, local tools |
+| 3D | request construction, envelope unwrapping, status mapping, polling, download |
+| Benchmark | isolation, metrics, storage, the absence of a verdict |
+| Storage | migrations, foreign keys, concurrency, secrets |
+| GUI | panels, the transcript, and one full run through the window, offscreen |
+
+The bugs these found are in the commit messages. Several were user-visible: a
+tool result's error code parsed from the wrong brace, a bridge address that never
+reached the `blender-mcp` child process, a request that breached its budget going
+unrecorded, a Qt signal dropped because it was emitted from a plain thread.
+
+## Roadmap
+
+- [x] MCP client, agent loop, streaming, tool calls
+- [x] OpenAI-compatible, Anthropic, Gemini, mock providers
+- [x] Tripo: text→3D, image→3D, polling, download
+- [x] Cost tracking, budgets, cancellation
+- [x] Benchmark with isolated runs and manual review
+- [x] Chat, Scene, Tasks, Benchmark, Models, Settings
+- [ ] Vision loop: render, look, correct. The pieces exist — `render_preview`
+  returns an image, models declare `supports_vision` — but nothing closes the loop
+- [ ] `blender.import_asset`, so a generated asset lands in the scene without
+  `execute_python`
+- [ ] More 3D providers behind the same interface
+- [ ] Multiple MCP servers in the UI (the manager already merges them)
+- [ ] Project files with a starting `.blend`, so a project reopens where it was
+
+## Licence
+
+MIT.
