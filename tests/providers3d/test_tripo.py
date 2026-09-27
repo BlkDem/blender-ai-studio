@@ -395,3 +395,18 @@ async def test_the_mock_provider_can_fail_on_purpose() -> None:
     task = await provider.create(AssetRequest(prompt="x"))
     assert task.status is TaskStatus.FAILED
     assert "out of credits" in task.error
+
+
+async def test_a_presigned_download_url_yields_a_usable_format() -> None:
+    """Tripo returns a signed S3 link.
+
+    Everything after "?" is signature, so the format used to come back as
+    "glb?Policy=eyJ..." -- which is a format nobody can name a file after, and
+    a filename a filesystem may well refuse.
+    """
+    from app.providers3d.tripo import _format_of
+
+    signed = "https://tripo-data.example/tcli/20260927/task/tripo_model.glb?Policy=eyJTdGF0&Signature=abc~def"
+    assert _format_of(signed) == "glb"
+    assert _format_of("https://example/model.glb") == "glb"
+    assert _format_of("https://example/model") == "glb", "no extension still means a GLB here"

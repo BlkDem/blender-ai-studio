@@ -119,9 +119,9 @@ async def run(options: argparse.Namespace) -> int:
 
     try:
         print("\n1. the pieces", flush=True)
-        # Both shortcuts drive the pipeline without a model, and saying so is
-        # clearer than failing a check about something the run never needed.
-        if not (options.direct or options.import_only):
+        # All three shortcuts drive the pipeline without a model, and saying so
+        # is clearer than failing a check about something the run never needed.
+        if not (options.direct or options.import_only or options.resume):
             check("an LLM is configured", bool(options.base_url and options.model), options.model)
         provider = context.three_d.provider("tripo")
         check(
@@ -150,6 +150,19 @@ async def run(options: argparse.Namespace) -> int:
             written = options.import_only
             submission = {"provider": "fixture", "provider_task_id": "fixture", "status": "succeeded"}
             check("the fixture is a GLB", written.read_bytes()[:4] == b"glTF", written)
+        elif options.resume:
+            # A generation outlives the client that asked for it: the run gets
+            # killed, the network drops, the laptop closes. The task is still on
+            # the provider's side, still billing, and re-submitting would pay for
+            # it twice.
+            print(f"\n3. picking up task {options.resume}", flush=True)
+            submission = {
+                "provider": "tripo",
+                "provider_task_id": options.resume,
+                "status": "running",
+                "submitted": True,
+                "resumed": True,
+            }
         elif options.direct:
             # The same handler the model would call, invoked directly. This
             # isolates the pipeline from the model's judgement: a 3B model asked
@@ -253,10 +266,12 @@ async def run(options: argparse.Namespace) -> int:
                 int(after.get("total", 0)) > start_count,
                 f"{start_count} -> {after.get('total')}",
             )
-            wanted = options.name.lower()
+            # The report is a diff of the scene, so it names what the import
+            # added. Matching a word from the prompt would pass on an object
+            # that was already sitting there.
             check(
-                "the imported object is in the scene",
-                any(wanted.split()[0] in name.lower() for name in names),
+                "the imported objects are in the scene",
+                bool(report.imported) and all(name in names for name in report.imported),
                 report.imported[:4],
             )
             if options.cleanup:
@@ -324,6 +339,12 @@ def main() -> int:
         "--direct",
         action="store_true",
         help="call generate_3d_asset's handler directly, skipping the model's choice",
+    )
+    parser.add_argument(
+        "--resume",
+        default="",
+        metavar="TASK_ID",
+        help="skip submission and pick up a task the provider is already running",
     )
     parser.add_argument(
         "--import-only",

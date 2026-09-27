@@ -30,6 +30,19 @@ from app.providers3d.models import AssetRequest, AssetResult, ProviderTask, Task
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://openapi.tripo3d.ai/v3"
+
+
+def _format_of(url: str) -> str:
+    """The file extension in a URL, ignoring the query string.
+
+    Tripo hands back a presigned link, and ``Path(url).suffix`` on one of those
+    is ``.glb?Policy=...&Signature=...`` -- a format nobody can name a file
+    after.
+    """
+    suffix = Path(url.split("?", 1)[0]).suffix
+    return suffix.lstrip(".").lower() or "glb"
+
+
 DEFAULT_MODEL = "v3.1-20260211"
 
 #: Provider status -> the studio's. Anything unknown is left as running, because
@@ -204,7 +217,11 @@ class TripoProvider(ThreeDProvider):
                 return failed_task(task, "Tripo reported success but returned no model URL")
             task.result = AssetResult(
                 url=url,
-                format=Path(url).suffix.lstrip(".").lower() or "glb",
+                # The download URL is a presigned S3 link: everything after "?"
+                # is signature, not filename, so the suffix has to be taken from
+                # the path alone. Reading the whole string yields a "format" of
+                # "glb?policy=eyj..." and a file named after a signature.
+                format=_format_of(url),
                 credits=task.credits,
                 cost_usd=task.cost_usd,
                 extras={k: v for k, v in output.items() if k != "model_url"},

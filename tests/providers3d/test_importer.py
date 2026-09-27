@@ -61,10 +61,9 @@ class ImportMCP(MCPManager):
         if name == "blender.get_objects":
             self.lookups += 1
             names = ["Cube"] if self.lookups == 1 else ["Cube", "Imported_1", "Imported_2"]
+            objects = [{"name": n, "location": [0.0, 0.0, 0.0], "dimensions": [1.0, 0.7, 0.7]} for n in names]
             return ToolOutcome(
-                call_id="1",
-                tool=name,
-                text=json.dumps({"objects": [{"name": n} for n in names], "total": len(names)}),
+                call_id="1", tool=name, text=json.dumps({"objects": objects, "total": len(objects)})
             )
         return ToolOutcome(call_id="1", tool=name, text="{}", is_error=True)
 
@@ -132,6 +131,10 @@ async def test_an_import_reports_what_arrived(glb: Path) -> None:
     assert report.imported == ["Imported_1", "Imported_2"]
     assert report.scene_total == 3
     assert report.object_count == 2
+    # Where it landed: an import goes where the file says, which is often the
+    # origin, and a person who is not told that goes looking for it.
+    assert report.placed["Imported_1"] == {"location": [0.0, 0.0, 0.0], "dimensions": [1.0, 0.7, 0.7]}
+    assert "Cube" not in report.placed, "only what arrived is described"
     assert report.via == EXECUTE_PYTHON
     assert report.summary()["new_objects"] == 2
 

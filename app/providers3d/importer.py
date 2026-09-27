@@ -49,6 +49,11 @@ class ImportReport:
     """What the import did."""
 
     imported: list[str] = field(default_factory=list)
+    #: Where each imported object ended up, as the scene reports it. An import
+    #: lands wherever the file says, which is often the world origin -- inside
+    #: whatever else is standing there. Saying so is the difference between a
+    #: person finding the asset and hunting for it.
+    placed: dict[str, dict[str, Any]] = field(default_factory=dict)
     object_count: int = 0
     scene_total: int = 0
     path: str = ""
@@ -57,6 +62,7 @@ class ImportReport:
     def summary(self) -> dict[str, Any]:
         return {
             "imported": self.imported,
+            "placed": self.placed,
             "new_objects": len(self.imported),
             "scene_total": self.scene_total,
             "path": self.path,
@@ -103,7 +109,7 @@ async def import_asset(
     # What arrived is the difference between the scene before and after. The
     # operator itself only says FINISHED, and a name it invents is worse than no
     # name at all -- "did the object actually show up" is the whole question.
-    before = await _names(bridge, timeout)
+    before = await _objects(bridge, timeout)
     outcome = await _call(
         bridge, EXECUTE_PYTHON, {"code": _IMPORT_CODE.format(path=_windows_path(path))}, timeout
     )
@@ -114,8 +120,9 @@ async def import_asset(
     except json.JSONDecodeError as exc:
         raise ThreeDError("Blender's answer to the import was not readable", path=str(path)) from exc
 
-    after = await _names(bridge, timeout)
-    arrived = [name for name in after if name not in before]
+    after = await _objects(bridge, timeout)
+    seen = {str(obj["name"]) for obj in before}
+    arrived = [str(obj["name"]) for obj in after if str(obj["name"]) not in seen]
     if not arrived:
         # Blender accepted the file and nothing is in the scene: a GLB with no
         # geometry, or one that went somewhere the object list does not reach.
@@ -127,6 +134,7 @@ async def import_asset(
         )
     report = ImportReport(path=str(path))
     report.imported = arrived or _imported_names(payload)
+    report.placed = {str(obj["name"]): _placement(obj) for obj in after if str(obj["name"]) in arrived}
     report.scene_total = len(after)
     report.object_count = len(report.imported)
     logger.info("imported %d object(s) from %s: %s", len(report.imported), path.name, arrived)
@@ -218,8 +226,8 @@ async def _call(bridge: MCPManager, tool: str, arguments: dict[str, Any], timeou
     return {"is_error": outcome.is_error, "text": outcome.text, "code": outcome.error_code}
 
 
-async def _names(bridge: MCPManager, timeout: float) -> list[str]:
-    """The names in the scene, best effort: a report is not worth failing over."""
+async def _objects(bridge: MCPManager, timeout: float) -> list[dict[str, Any]]:
+    """The scene as the bridge reports it, best effort: a report is not worth failing over."""
     scene = await _call(bridge, "blender.get_objects", {"limit": 500}, timeout)
     if scene.get("is_error"):
         return []
@@ -227,7 +235,15 @@ async def _names(bridge: MCPManager, timeout: float) -> list[str]:
         objects = json.loads(scene.get("text") or "{}").get("objects", [])
     except json.JSONDecodeError:
         return []
-    return [str(obj.get("name")) for obj in objects if obj.get("name")]
+    return [obj for obj in objects if obj.get("name")]
+
+
+def _placement(obj: dict[str, Any]) -> dict[str, Any]:
+    """The two numbers that say where the asset is and how big it is."""
+    return {
+        "location": [round(float(v), 3) for v in (obj.get("location") or [])],
+        "dimensions": [round(float(v), 3) for v in (obj.get("dimensions") or [])],
+    }
 
 
 def _imported_names(payload: dict[str, Any]) -> list[str]:

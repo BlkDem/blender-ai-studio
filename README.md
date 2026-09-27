@@ -231,7 +231,9 @@ you:      …later
 tasks:    succeeded · 100 credits · ~/.local/share/blender-ai-studio/assets/chest.glb
 ```
 
-Tripo is implemented against the real v3 API: submit, poll, download. Its
+Tripo is implemented against the real v3 API: submit, poll, download, and
+verified against the live service — a generated PBR model (43 MB) imported into
+a running Blender, 20 credits for one text-to-3D task with texture. Its
 `code`/`data` envelope and its `success`/`banned` statuses are translated inside
 the provider, so nothing above it knows they exist. `banned` in particular is
 reported as "Tripo refused this prompt under its content policy", because that
@@ -250,6 +252,12 @@ Importing needs `blender.execute_python`, which is off by default; when it is
 off, the task says so, names the tool, and **keeps the download**. The extension
 point for a future `blender.import_asset` MCP tool is the same place, and adding
 it there would not touch the agent or the task.
+
+A generation outlives the client that asked for it, so `asset_run.py --resume
+TASK_ID` picks a task up where the provider already has it instead of paying for
+it twice. The import report says where the asset landed, because a GLB arrives
+where its file says — usually the world origin, which is often inside whatever
+else is standing there.
 
 Where assets are downloaded matters and is a setting
 (`three_d.download_dir`, defaulting to `data_dir/assets`): the studio and Blender
