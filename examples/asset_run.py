@@ -192,6 +192,20 @@ async def run(options: argparse.Namespace) -> int:
                 submission.get("provider_task_id") or submission.get("error"),
             )
 
+        if not options.import_only and submission.get("submitted") is False:
+            # Tripo refused it -- an empty account, a bad model name, anything
+            # that needs a person to change something. There is no task to wait
+            # for, and waiting for one is how a refusal looks like a hang.
+            print("\n4. nothing to wait for", flush=True)
+            print(f"     the submission was refused: {submission.get('error')}", flush=True)
+            await context.close()
+            check("the refusal reached the caller", True, submission.get("error_code", ""))
+            print(
+                f"\n{'FAILED: ' + ', '.join(FAILURES) if FAILURES else 'PASSED'} every check",
+                flush=True,
+            )
+            return 1 if FAILURES else 0
+
         if not options.import_only:
             print("\n4. waiting for the generation", flush=True)
             task_id = submission.get("provider_task_id", "")
@@ -280,10 +294,12 @@ async def _poll(context: AppContext, provider_task_id: str, timeout: float):
     return task
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+def add_common_arguments(parser: argparse.ArgumentParser) -> None:
+    """The arguments every live run needs: where Blender is, and how to reach it.
+
+    Shared so the two runs cannot drift apart in how they find a Blender -- a
+    difference that would look like a product bug and be a typo.
+    """
     parser.add_argument("--blender-mcp", required=True)
     parser.add_argument("--blender-mcp-env", default="")
     parser.add_argument("--python", default=sys.executable)
@@ -292,11 +308,18 @@ def main() -> int:
     parser.add_argument("--base-url", default="")
     parser.add_argument("--model", default="")
     parser.add_argument("--tripo-key", default=os.environ.get("TRIPO_API_KEY", ""))
+    parser.add_argument("--wait-seconds", type=float, default=90.0)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add_common_arguments(parser)
     parser.add_argument("--prompt", default="Create a medieval wooden chest.")
     parser.add_argument("--name", default="Chest")
     parser.add_argument("--no-texture", action="store_true")
     parser.add_argument("--timeout", type=float, default=600.0)
-    parser.add_argument("--wait-seconds", type=float, default=90.0)
     parser.add_argument(
         "--direct",
         action="store_true",

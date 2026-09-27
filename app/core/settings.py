@@ -82,6 +82,11 @@ class ThreeDConfig(BaseModel):
     max_credits: int = 200
     poll_interval: float = 5.0
     poll_timeout: float = 900.0
+    #: Where generated assets are written before they go into the scene. It has
+    #: to be somewhere Blender can read: the studio and Blender are often on
+    #: different sides of a filesystem, and a download that lands in the wrong
+    #: place cannot be imported at all.
+    download_dir: str = ""
 
 
 class AgentConfig(BaseModel):

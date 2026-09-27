@@ -29,6 +29,7 @@ class MockThreeDProvider(ThreeDProvider):
         polls_before_done: int = 1,
         fail_with: str = "",
         usd_per_credit: float = 0.0,
+        download_from: Path | None = None,
         **options: Any,
     ) -> None:
         super().__init__(api_key="mock", base_url="mock://", model="mock-model", **options)
@@ -37,6 +38,10 @@ class MockThreeDProvider(ThreeDProvider):
         self.polls_before_done = polls_before_done
         self.fail_with = fail_with
         self.usd_per_credit = usd_per_credit
+        #: A real GLB to serve instead of the placeholder bytes, for a live run
+        #: that has to survive a real import. The placeholder is deliberate in
+        #: unit tests -- nothing opens it -- and useless the moment Blender does.
+        self.download_from = download_from
         #: What was asked, so a test can assert on the request too.
         self.requests: list[AssetRequest] = []
         self.polls = 0
@@ -77,7 +82,10 @@ class MockThreeDProvider(ThreeDProvider):
 
     async def download(self, task: ProviderTask, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(b"glTF-fixture")
+        if self.download_from is not None:
+            destination.write_bytes(Path(self.download_from).read_bytes())
+        else:
+            destination.write_bytes(b"glTF-fixture")
         return destination
 
     def estimate_credits(self, request: AssetRequest) -> int:

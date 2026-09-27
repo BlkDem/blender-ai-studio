@@ -147,7 +147,11 @@ class TaskManager:
             self._publish(EventType.TASK_FAILED, **task.to_dict())
         except Exception as exc:  # noqa: BLE001 - a task's failure is data
             task.state = TaskState.FAILED
-            task.error = str(exc)
+            # The hint is the actionable half -- which tool to enable, which
+            # account to top up -- and a background task has nowhere else to
+            # show it. The Tasks panel only ever renders this one string.
+            hint = getattr(exc, "hint", "")
+            task.error = f"{exc} -- {hint}" if hint else str(exc)
             logger.exception("task %s failed", task.name)
             self._publish(EventType.TASK_FAILED, **task.to_dict())
         else:

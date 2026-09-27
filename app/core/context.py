@@ -12,13 +12,14 @@ diagnostic that lies.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from app.core.agent import Agent, LocalTool
 from app.core.cost import Budget
-from app.core.errors import ConfigurationError
+from app.core.errors import ConfigurationError, ThreeDError
 from app.core.events import EventBus
 from app.core.settings import AgentConfig, BudgetConfig, MCPServerConfig, Settings, ThreeDConfig
 from app.core.task_manager import TaskManager
@@ -27,6 +28,7 @@ from app.llm.models import ModelInfo
 from app.llm.registry import LLMRegistry, registry_from_settings
 from app.mcp.manager import MCPManager
 from app.mcp.models import ServerInfo
+from app.providers3d.models import ProviderTask, TaskStatus
 from app.providers3d.registry import ThreeDRegistry
 from app.storage.repositories import Studio
 from app.storage.secrets import SecretStore
@@ -196,13 +198,63 @@ class AppContext:
         """
         if self.three_d is None or not self.three_d.any_enabled():
             return []
-        return [three_d_tool(self.three_d, self.settings.three_d)]
+        return [
+            three_d_tool(
+                self.three_d,
+                self.settings.three_d,
+                tasks=self.tasks,
+                on_ready=self._import_generated,
+                download_dir=self.asset_dir(),
+            )
+        ]
+
+    def asset_dir(self) -> Path:
+        """Where generated models are written, and the boundary to watch.
+
+        The studio may well be on a different side of a filesystem from Blender,
+        in which case a download that lands here cannot be opened there. The
+        import reports that clearly, but naming the directory here means the
+        failure arrives with a path in it instead of as a mystery.
+        """
+        # str(), not .strip(): a caller that assigned a Path here is not wrong,
+        # and the failure should be about the directory, not its type.
+        configured = str(self.settings.three_d.download_dir or "").strip()
+        return Path(configured) if configured else self.settings.data_dir / "assets"
+
+    async def _import_generated(self, task: Any, path: Path) -> Any:
+        """Hand a finished model to Blender, when there is a way in."""
+        from app.providers3d.importer import can_import, import_asset
+
+        if self.mcp is None or not can_import(self.mcp):
+            from app.providers3d.importer import EXECUTE_PYTHON
+
+            raise ThreeDError(
+                "The model is ready, but there is no way into Blender",
+                hint=(
+                    f"{EXECUTE_PYTHON} is disabled in Settings, so the asset was "
+                    f"downloaded to {path} and left there."
+                ),
+                path=str(path),
+            )
+        return await import_asset(self.mcp, path)
 
 
-def three_d_tool(registry: ThreeDRegistry, config: ThreeDConfig) -> LocalTool:
-    """The one tool the model sees for 3D generation."""
+def three_d_tool(
+    registry: ThreeDRegistry,
+    config: ThreeDConfig,
+    tasks: TaskManager | None = None,
+    on_ready: Callable[[ProviderTask, Path], Awaitable[Any]] | None = None,
+    download_dir: Path | None = None,
+) -> LocalTool:
+    """The one tool the model sees for 3D generation.
+
+    The submission is awaited -- one request, and a refusal such as an empty
+    account has to reach the model in the same breath, not minutes later. What
+    follows is the part that takes minutes, and that runs as a tracked task, so
+    the Tasks panel, the database and the agent's own costs all see the same
+    numbers.
+    """
     from app.providers3d.base import AssetRequest
-    from app.providers3d.models import TaskStatus
 
     async def generate(arguments: dict[str, Any], *, run_id: str = "") -> dict[str, Any]:
         prompt = str(arguments.get("prompt") or "").strip()
@@ -223,19 +275,44 @@ def three_d_tool(registry: ThreeDRegistry, config: ThreeDConfig) -> LocalTool:
             task = await provider.create(request, run_id=run_id)
         except Exception as exc:  # noqa: BLE001 - reported to the model, not raised
             return {"error": str(exc), "provider": provider_name}
-        return {
+        if str(task.status) == str(TaskStatus.FAILED):
+            return {
+                "provider": provider_name,
+                "status": str(task.status),
+                "error": task.error,
+                "credits": task.credits,
+                "submitted": False,
+            }
+
+        answer: dict[str, Any] = {
             "provider": provider_name,
             "task_id": task.id,
             "provider_task_id": task.provider_task_id,
             "status": str(task.status),
             "kind": kind,
             "credits": task.credits,
-            "note": (
-                "Generation is asynchronous. The asset is not in the scene yet; "
-                "check the Tasks panel, then import it when it is ready."
-            ),
-            "status_enum": str(TaskStatus.RUNNING),
+            "submitted": True,
         }
+        if tasks is None:
+            answer["note"] = (
+                "Generation is asynchronous and nothing is watching it: check the "
+                "Tasks panel, then import it when it is ready."
+            )
+            return answer
+
+        studio_task = await tasks.start(
+            f"3D: {prompt[:48]}",
+            _finish_asset(provider, task, config, on_ready, download_dir),
+            provider=provider_name,
+            run_id=run_id,
+            payload={"prompt": prompt, "provider_task_id": task.provider_task_id, "kind": kind},
+        )
+        answer["studio_task_id"] = studio_task.id
+        answer["note"] = (
+            "Submitted. It is being generated now, and the finished model is "
+            "imported into the scene automatically; watch it in the Tasks panel."
+        )
+        return answer
 
     return LocalTool(
         name="generate_3d_asset",
@@ -271,6 +348,63 @@ def three_d_tool(registry: ThreeDRegistry, config: ThreeDConfig) -> LocalTool:
         },
         handler=generate,
     )
+
+
+def _finish_asset(
+    provider: Any,
+    task: Any,
+    config: ThreeDConfig,
+    on_ready: Callable[[Any, Path], Awaitable[Any]] | None,
+    download_dir: Path | None,
+) -> Callable[[Any], Awaitable[Any]]:
+    """The slow half of a 3D request: wait, download, import.
+
+    Written as a closure so the tracked task carries the provider task it is
+    about rather than reaching for a registry of its own.
+    """
+
+    async def work(studio_task: Any) -> dict[str, Any]:
+        finished = await provider.wait_for(
+            task,
+            interval=config.poll_interval,
+            timeout=config.poll_timeout,
+            on_progress=lambda part: _progress(studio_task, part),
+        )
+        # Two ways to come back unfinished, and neither may be downloaded: a
+        # failure, and a timeout that leaves the task still running with the
+        # reason in `error`. Fetching either would hand back whatever the
+        # provider has so far and call it the finished model.
+        if finished.status == TaskStatus.FAILED:
+            raise ThreeDError(finished.error or "the provider reported a failure")
+        if not finished.status.terminal:
+            raise ThreeDError(finished.error or "the generation never finished")
+        destination = (download_dir or Path(".")) / f"{finished.provider_task_id or finished.id}.glb"
+        studio_task.detail = "downloading"
+        path = await provider.download(finished, destination)
+        studio_task.detail = "importing"
+        if on_ready is None:
+            studio_task.detail = f"ready at {path}"
+            return {"path": str(path), "imported": False}
+        report = await on_ready(finished, path)
+        studio_task.detail = f"{len(report.imported)} object(s) in the scene"
+        studio_task.credits = finished.credits
+        return {"path": str(path), "imported": True, "objects": report.imported}
+
+    return work
+
+
+def _progress(studio_task: Any, part: Any) -> None:
+    """Copy a provider's progress onto the task the user is watching.
+
+    The providers disagree about units -- some count 0 to 1, some 0 to 100 -- and
+    neither reports anything before the first poll. A bar that jumps to full
+    because the field was empty is worse than one that sits still, so unknown
+    stays unknown.
+    """
+    value = getattr(part, "progress", None)
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return
+    studio_task.progress = min(1.0, float(value) / 100.0 if value > 1 else float(value))
 
 
 def describe_provider(provider: LLMProvider, model: str) -> ModelInfo:

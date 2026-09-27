@@ -237,11 +237,25 @@ the provider, so nothing above it knows they exist. `banned` in particular is
 reported as "Tripo refused this prompt under its content policy", because that
 is the user's prompt to fix rather than a failure to retry.
 
-A generated asset is **not** in the scene yet. Importing it needs
-`blender.execute_python`, which is off by default; when it is off, the studio
-says so instead of pretending. The extension point for a future
-`blender.import_asset` MCP tool is the same place, and adding it there would not
-touch the agent.
+A generated asset is **not** in the scene the moment it is submitted — that takes
+minutes and a provider's own state machine. So the tool submits, answers the
+model immediately, and hands the rest to a tracked task: poll, download, import.
+The Tasks panel, the database and the agent's costs all come from that one task,
+so the numbers in the table are the numbers the user watched appear. A submission
+that is *refused* — an account with no credit, a prompt the provider will not take
+— comes back in the same breath as the call, because that is something to go and
+fix rather than wait for.
+
+Importing needs `blender.execute_python`, which is off by default; when it is
+off, the task says so, names the tool, and **keeps the download**. The extension
+point for a future `blender.import_asset` MCP tool is the same place, and adding
+it there would not touch the agent or the task.
+
+Where assets are downloaded matters and is a setting
+(`three_d.download_dir`, defaulting to `data_dir/assets`): the studio and Blender
+are often on different sides of a filesystem, and a model that lands somewhere
+Blender cannot read is a model that cannot be imported. The importer says so in
+those terms, and reports the path it actually handed over.
 
 ## Benchmark
 
@@ -393,7 +407,7 @@ unrecorded, a Qt signal dropped because it was emitted from a plain thread.
 - [ ] Vision loop: render, look, correct. The pieces exist — `render_preview`
   returns an image, models declare `supports_vision` — but nothing closes the loop
 - [ ] `blender.import_asset`, so a generated asset lands in the scene without
-  `execute_python`
+  `execute_python` — the importer prefers it the moment it exists
 - [ ] More 3D providers behind the same interface
 - [ ] Multiple MCP servers in the UI (the manager already merges them)
 - [ ] Project files with a starting `.blend`, so a project reopens where it was
