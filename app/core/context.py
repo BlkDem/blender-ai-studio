@@ -239,11 +239,23 @@ def three_d_tool(registry: ThreeDRegistry, config: ThreeDConfig) -> LocalTool:
 
     return LocalTool(
         name="generate_3d_asset",
+        # The description is the model's only guidance about when to reach for
+        # this, so it names the boundary explicitly. A small model reading
+        # "create a medieval wooden chest" and reaching for blender.create_object
+        # is not a reasoning failure so much as a missing distinction, and the
+        # difference between a specific modelled object and an arrangement of
+        # primitives is the whole reason this tool exists.
         description=(
-            "Generate a 3D asset from a text description, or from an image URL. "
-            "Use it when a real model of the object is wanted rather than an "
-            "approximation built from primitives. Returns a task id: generation "
-            "is asynchronous, and the asset is imported separately."
+            "Generate a real 3D model of a specific object with a 3D generation "
+            "service, from a text description or an image URL.\n"
+            "Use it for any object a studio would have modelled: furniture, "
+            "vehicles, animals, plants, weapons, buildings, props, characters.\n"
+            "Examples: 'a medieval wooden chest', 'a rusty samurai helmet', "
+            "'a dragon' -> this tool.\n"
+            "Use blender.create_object instead for arrangement of primitives: "
+            "'a table with four legs', 'a room', 'a stack of boxes'.\n"
+            "Returns a task id: generation takes minutes, runs in the background, "
+            "and the asset is imported into the scene afterwards."
         ),
         schema={
             "type": "object",

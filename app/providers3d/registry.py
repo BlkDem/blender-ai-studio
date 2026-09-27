@@ -37,8 +37,20 @@ class ThreeDRegistry:
         self._secrets: SecretStore | None = None
 
     def use_secrets(self, secrets: SecretStore) -> None:
+        """Point the registry at a secret store and rebuild its providers.
+
+        Rebuilding is the point, not a side effect: a provider built before the
+        keys were available holds an empty key forever, and the capability that
+        depends on it stays hidden even though the user has just entered a valid
+        one. That is the difference between a key that works and a key that is
+        stored.
+        """
         self._secrets = secrets
         self._providers.clear()
+        try:
+            self.provider()
+        except ConfigurationError:
+            logger.info("no 3D provider selected after wiring the secrets")
 
     def configure(self, config: ThreeDConfig) -> None:
         self._config = config

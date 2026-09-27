@@ -47,6 +47,22 @@ def qapp() -> QApplication:
     yield app
 
 
+@pytest.fixture(autouse=True)
+def no_widget_left_behind(qapp: QApplication) -> None:
+    """Close every top-level widget once the test is done.
+
+    A widget that is still alive when the interpreter tears Qt down takes the
+    process with it: the suite finishes green and then dumps core, which reads
+    like a flaky test and is not one. This also turns a leaked window into
+    something a test can see.
+    """
+    yield
+    for widget in qapp.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    qapp.processEvents()
+
+
 def pump(times: int = 20, step: float = 0.01) -> None:
     """Let queued signals arrive."""
     app = QApplication.instance()
@@ -432,8 +448,14 @@ async def window(qapp, database_path: Path):
         qapp.processEvents()
         await asyncio.sleep(0.01)
     yield win
-    core.stop()
+    # Qt tears widgets down at interpreter exit, and a live MainWindow meeting a
+    # dead QApplication segfaults on the way out -- the suite would end in a core
+    # dump with every test green. Close things in the order a person would.
     await context.close()
+    win.close()
+    win.deleteLater()
+    core.stop()
+    qapp.processEvents()
 
 
 async def test_the_window_runs_a_turn_and_shows_every_step(window, qapp) -> None:
@@ -464,6 +486,50 @@ async def test_a_run_can_be_stopped_from_the_window(window, qapp) -> None:
     window.stop_run()
     qapp.processEvents()
     assert window.chat.send.isEnabled() is True
+
+
+async def test_stopping_reaches_the_agent_that_is_actually_running(window, qapp) -> None:
+    """The button used to be decorative.
+
+    It set the UI back to idle while the agent carried on to the end, and the
+    window then said "Stopped" over a run that had not stopped. The provider
+    here takes half a minute, so a run that ends at once can only have been
+    cancelled.
+    """
+    never_finishes = asyncio.Event()
+
+    class Slow(MockLLMProvider):
+        async def chat(self, request):  # type: ignore[override]
+            await never_finishes.wait()
+            raise AssertionError("the model was allowed to finish")
+
+        async def stream(self, request):  # type: ignore[override]
+            await never_finishes.wait()
+            raise AssertionError("the model was allowed to finish")
+            yield  # pragma: no cover - makes this an async generator
+
+    window.context.llm.set_provider("scripted", Slow([], model="scripted-model"))
+    window.model_selector.setCurrentIndex(0)
+    window.send("what is in the scene?")
+    agent = None
+    for _ in range(100):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        agent = agent or window._active_agent  # noqa: SLF001
+        if agent is not None and window.current_run_id and agent.is_running(window.current_run_id):
+            break
+    assert agent is not None, "the run started"
+    run_id = window.current_run_id
+
+    window.stop_run()
+    for _ in range(100):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if not agent.is_running(run_id):
+            break
+    assert not agent.is_running(run_id), "the agent was cancelled, not just forgotten by the window"
+    assert window.chat.send.isEnabled() is True
+    never_finishes.set()
 
 
 async def test_events_from_the_bus_reach_the_window(window, qapp) -> None:

@@ -422,7 +422,7 @@ class Agent:
             images, credits, usd, is_error = [], 0.0, 0.0, True
             error_code = getattr(exc, "code", "ERROR")
 
-        body = self._for_model(outcome_text)
+        body = self._for_model(self._with_recovery_hint(call.name, error_code, outcome_text))
 
         if self.studio is not None:
             record = await self.studio.tool_calls.start(run_id, call.name, call.arguments)
@@ -435,7 +435,7 @@ class Agent:
         result.totals = self.cost.totals
         result.images.extend(images)
 
-        body = self._for_model(outcome_text)
+        body = self._for_model(self._with_recovery_hint(call.name, error_code, outcome_text))
         # The duration belongs in the event: it is the one number a person
         # watching the transcript cannot work out for themselves, and the card in
         # the chat is where they look for it.
@@ -451,6 +451,25 @@ class Agent:
         )
         self._publish(run_id, EventType.COST, **self.cost.totals.to_dict())
         return ToolResult(call=call, content=body, is_error=is_error)
+
+    def _with_recovery_hint(self, tool: str, error_code: str, text: str) -> str:
+        """Turn one refusal into a step the model can take.
+
+        A transaction left open by an *earlier* session is invisible to this
+        agent -- it only knows the ones it began -- so the raw
+        ``TRANSACTION_ACTIVE`` arrives as a complaint the model cannot act on.
+        Naming the two tools that clear it is the difference between a run that
+        gives up and a run that recovers.
+        """
+        if error_code != "TRANSACTION_NOT_ACTIVE" and error_code != "TRANSACTION_ACTIVE":
+            return text
+        if not tool.endswith("begin_transaction"):
+            return text
+        return (
+            f"{text}\n\nA transaction is still open in Blender, from this run or an "
+            "earlier one. Close it first: call blender.commit_transaction to keep the "
+            "work, or blender.rollback_transaction to undo it, then try again."
+        )
 
     def _note_transaction(self, tool: str, is_error: bool) -> None:
         """Track begin/commit/rollback, so a stop can be explained.
@@ -549,6 +568,17 @@ class Agent:
         )
 
     # --- cancellation ------------------------------------------------------
+
+    def is_running(self, run_id: str = "") -> bool:
+        """Whether a run is still in flight.
+
+        Cancellation that cannot be observed is cancellation that cannot be
+        trusted, and the window needs the same answer the test does.
+        """
+        if not run_id and self._runs:
+            run_id = next(reversed(self._runs))
+        task = self._runs.get(run_id)
+        return task is not None and not task.done()
 
     def cancel(self, run_id: str = "") -> bool:
         """Stop a run. Without an id, the most recent one."""

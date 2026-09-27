@@ -9,6 +9,7 @@ should.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import pytest
@@ -65,7 +66,14 @@ class FakeMCP(MCPManager):
         if name not in self._catalog:
             return ToolOutcome(call_id="x", tool=name, text=f"No tool named {name}", is_error=True)
         text, is_error = self.outcomes.get(name, (f"{name} ok", False))
-        return ToolOutcome(call_id="x", tool=name, text=text, is_error=is_error)
+        # The real client reads a structured code out of the result text; the stub
+        # has to do the same or it hides every behaviour that keys off it.
+        code = ""
+        for token in re.findall(r"\b([A-Z][A-Z_]{5,})\b", text):
+            code = token
+        return ToolOutcome(
+            call_id="x", tool=name, text=text, is_error=is_error, error_code=code if is_error else ""
+        )
 
 
 @pytest.fixture
@@ -144,6 +152,33 @@ async def test_a_failed_tool_is_reported_to_the_model_not_swallowed(mcp: FakeMCP
     result = await agent.run("look at something missing")
     assert result.tool_calls[0].is_error is True
     assert "no such object" in result.tool_calls[0].content
+
+
+async def test_a_refused_transaction_is_given_a_way_out() -> None:
+    """A transaction left by an earlier session is invisible to this agent, so the
+    raw refusal is not something a model can act on."""
+    refusing = transactional_mcp()
+    refusing.outcomes["blender.begin_transaction"] = (
+        "failed (TRANSACTION_ACTIVE): A transaction is already open",
+        True,
+    )
+    agent = agent_with(
+        refusing,
+        ScriptedTurn(tool_calls=[("blender.begin_transaction", {})]),
+        ScriptedTurn(text="I will roll it back first."),
+    )
+    result = await agent.run("build something")
+    seen = result.tool_calls[0].content
+    assert "blender.rollback_transaction" in seen
+    assert "blender.commit_transaction" in seen
+    assert "earlier one" in seen
+
+
+async def test_an_unrelated_error_gets_no_transaction_advice(mcp: FakeMCP) -> None:
+    mcp.outcomes["blender.get_scene"] = ("failed (OBJECT_NOT_FOUND)", True)
+    agent = agent_with(mcp, ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="ok"))
+    result = await agent.run("look")
+    assert "rollback_transaction" not in result.tool_calls[0].content
 
 
 async def test_an_unknown_tool_is_told_to_the_model(mcp: FakeMCP) -> None:

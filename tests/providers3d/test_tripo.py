@@ -84,6 +84,19 @@ async def test_an_http_error_is_reported() -> None:
     assert "401" in task.error
 
 
+async def test_an_empty_account_says_so_rather_than_looking_like_a_bug() -> None:
+    """Tripo answers 403 'not enough credit' to a perfectly valid request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403, json={"code": 4003, "message": "You don't have enough credit to create this task"}
+        )
+
+    task = await tripo_with(handler).create(AssetRequest(prompt="chest"))
+    assert task.status is TaskStatus.FAILED
+    assert "enough credit" in task.error
+
+
 async def test_a_network_failure_does_not_raise() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route")
@@ -320,6 +333,26 @@ def test_a_key_comes_from_the_secret_store(secrets_file: Path) -> None:
     secrets.set("tripo.api_key", "tsk-secret")
     registry = ThreeDRegistry()
     registry.use_secrets(secrets)
+    assert registry.provider("tripo").api_key == "tsk-secret"
+
+
+def test_wiring_the_secrets_rebuilds_a_provider_built_without_a_key(secrets_file: Path) -> None:
+    """The key was typed, so the capability must appear.
+
+    A registry that cleared its providers and stopped there left a provider
+    holding an empty key, and generate_3d_asset stayed hidden from the model for
+    ever -- a stored key and a working key looked identical from the outside.
+    """
+    registry = ThreeDRegistry()
+    assert registry.any_enabled() is False
+    before = registry.provider("tripo")
+    assert before.is_configured() is False
+
+    secrets = SecretStore(secrets_file)
+    secrets.set("tripo.api_key", "tsk-secret")
+    registry.use_secrets(secrets)
+
+    assert registry.any_enabled() is True, "the capability must be offered once a key exists"
     assert registry.provider("tripo").api_key == "tsk-secret"
 
 

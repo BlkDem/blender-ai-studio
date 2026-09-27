@@ -280,6 +280,7 @@ def _envelope(response: httpx.Response, provider: str) -> dict[str, Any]:
         raise ProviderError(
             f"Tripo returned HTTP {response.status_code}: {_message(response)}",
             provider=provider,
+            hint=_billing_hint(_message(response)),
         )
     try:
         payload = response.json()
@@ -300,6 +301,24 @@ def _envelope(response: httpx.Response, provider: str) -> dict[str, Any]:
         )
     data = payload.get("data")
     return data if isinstance(data, dict) else payload
+
+
+def _billing_hint(message: str) -> str | None:
+    """What to do about the refusals that are not the code's fault.
+
+    "Not enough credit" arrives as a 403 with a perfectly valid request behind
+    it, and without a hint it reads as a bug in the client rather than an empty
+    account.
+    """
+    lowered = message.lower()
+    if "credit" in lowered or "balance" in lowered or "quota" in lowered:
+        return (
+            "The request was built and accepted; the account has no credit for it. "
+            "Top up the Tripo balance, or use a cheaper quality."
+        )
+    if "api key" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+        return "Check the Tripo API key in Settings → Models."
+    return None
 
 
 def _message(response: httpx.Response) -> str:

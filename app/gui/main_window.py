@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self.setObjectName("main-window")
 
         self.current_run_id = ""
+        self._active_agent: Any = None
         self._cards_by_tool: dict[str, str] = {}
         self._benchmarks = BenchmarkStorage(context.studio.db) if context.studio else None
 
@@ -231,7 +232,14 @@ class MainWindow(QMainWindow):
 
     async def _run_agent(self, text: str) -> Any:
         agent = self.context.agent(self.current_provider(), self.current_model())
-        return await agent.run(text)
+        # Kept so Stop has something to stop. The agent was built and dropped
+        # inside this coroutine, which made the button a no-op that still looked
+        # like it worked: the run finished, the UI had already said otherwise.
+        self._active_agent = agent
+        try:
+            return await agent.run(text)
+        finally:
+            self._active_agent = None
 
     def _run_finished(self, result: Any) -> None:
         self.chat.set_busy(False)
@@ -245,18 +253,26 @@ class MainWindow(QMainWindow):
         self.refresh_scene()
 
     def stop_run(self) -> None:
-        if self.current_run_id:
-            self.core.submit(self._cancel_agent(), self._cancelled)
+        """Stop the run in flight, here and now.
+
+        Cancellation is a task cancel inside the core, so it has to be asked for
+        from the core thread -- but waiting for a round trip through the queue
+        before the UI unlocks would let a run that is already stopping look like
+        one that is still going.
+        """
+        agent = self._active_agent
+        if agent is not None and self.current_run_id:
+            self.core.submit(self._cancel_agent(agent), self._cancelled)
         self.chat.set_busy(False)
 
-    async def _cancel_agent(self) -> bool:
-        return (
-            self.context.agent_cancel(self.current_run_id) if hasattr(self.context, "agent_cancel") else False
-        )
+    async def _cancel_agent(self, agent: Any) -> bool:
+        return agent.cancel(self.current_run_id)
 
     def _cancelled(self, ok: bool) -> None:
         if ok:
             self.chat.add_note("Stopped.", role="system")
+        elif self._active_agent is not None:
+            self.chat.add_note("Nothing to stop -- the run had already finished.", role="system")
 
     def current_provider(self) -> str:
         data = self.model_selector.currentData() or ""

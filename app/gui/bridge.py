@@ -55,6 +55,7 @@ class CoreThread:
         self._ready = threading.Event()
         self._unsubscribe: Callable[[], None] | None = None
         self._stopping = False
+        self._stopped = False
         #: Core thread -> GUI thread. A plain queue, because both ends are real
         #: threads and neither Qt nor asyncio can hand over for us.
         self._inbox: queue.SimpleQueue[tuple[str, tuple[Any, ...]]] = queue.SimpleQueue()
@@ -115,11 +116,28 @@ class CoreThread:
             loop.close()
 
     def stop(self, timeout: float = 10.0) -> None:
-        if self.loop is None or self.thread is None:
+        """Shut the core down for good.
+
+        The loop is closed as well as stopped: a stopped loop is still an open
+        file descriptor and a live executor, and the next thread to touch it --
+        including the interpreter at exit -- pays for the leak.
+
+        Calling it twice is normal, not a mistake: Qt delivers ``closeEvent``
+        when the window shuts, and the caller may also stop the core on the way
+        out. The second call has to be a no-op rather than an error about a loop
+        that is already closed.
+        """
+        loop, thread = self.loop, self.thread
+        self.loop = self.thread = None
+        if loop is None or thread is None or self._stopped:
             return
         self._stopping = True
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join(timeout=timeout)
+        self._stopped = True
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=timeout)
+        if not thread.is_alive() and not loop.is_closed():
+            loop.close()
 
     # --- calling into the core --------------------------------------------
 
