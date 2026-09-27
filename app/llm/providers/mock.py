@@ -59,6 +59,17 @@ class ScriptedTurn:
         )
 
 
+def _words(text: str) -> list[str]:
+    """Split for streaming, with the space *before* each word after the first.
+
+    Reassembles to exactly the input: a trailing space on the last chunk would
+    quietly break every exact-match assertion downstream, and a model that
+    streams its final answer with a stray space reads as a different answer.
+    """
+    words = [word for word in text.split(" ") if word]
+    return [word if index == 0 else " " + word for index, word in enumerate(words)]
+
+
 class MockLLMProvider(LLMProvider):
     """Replays :class:`ScriptedTurn` objects, one per request.
 
@@ -125,17 +136,27 @@ class MockLLMProvider(LLMProvider):
         return response
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
+        if not self.script and type(self).chat is not MockLLMProvider.chat:
+            # A subclass that decides in chat() must stream too, or a test double
+            # that works in a non-streaming agent silently does nothing in a
+            # streaming one -- which is the default.
+            response = await self.chat(request)
+            yield StreamChunk(type="start")
+            for piece in _words(response.text):
+                yield StreamChunk(type="text", text=piece)
+            for call in response.tool_calls:
+                yield StreamChunk(type="tool_start", call_id=call.id, name=call.name)
+                yield StreamChunk(type="tool_end", call_id=call.id, name=call.name, arguments=call.arguments)
+            yield StreamChunk(type="usage", usage=response.usage)
+            yield StreamChunk(type="end", text=response.text, finish_reason=response.finish_reason)
+            return
         self.requests.append(request)
         turn = self._next_turn()
         if turn.error is not None:
             raise turn.error
         yield StreamChunk(type="start")
-        # Word by word, with the space *before* each word after the first, so the
-        # reassembled text is byte-identical to what was scripted. A trailing
-        # space here would quietly break every exact-match assertion downstream.
-        words = [word for word in turn.text.split(" ") if word]
-        for index, word in enumerate(words):
-            yield StreamChunk(type="text", text=(" " if index else "") + word)
+        for piece in _words(turn.text):
+            yield StreamChunk(type="text", text=piece)
         for name, arguments in turn.tool_calls:
             call = ToolCall.new(name, arguments)
             yield StreamChunk(type="tool_start", call_id=call.id, name=call.name)

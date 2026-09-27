@@ -183,6 +183,15 @@ class LLMRegistry:
             **options.get("kwargs", {}),
         )
 
+    def set_provider(self, name: str, provider: LLMProvider) -> None:
+        """Use a specific provider instance for a name.
+
+        For a test, and for a user who wants to force one model without editing
+        configuration. The instance is kept until the next
+        :meth:`configure`, so a benchmark can pin every model it compares.
+        """
+        self._providers[name] = provider
+
     def _api_key(self, name: str) -> str:
         """Secrets first, environment second.
 
