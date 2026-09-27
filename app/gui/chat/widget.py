@@ -10,6 +10,7 @@ prose stays readable.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
@@ -90,7 +91,15 @@ class ToolCallCard(QFrame):
         self.header.setStyleSheet(f"color: {ROLE_COLOURS['tool'].name()};")
         self.detail.setText("running…")
 
-    def set_result(self, *, is_error: bool, text: str, duration_ms: float, images: int = 0) -> None:
+    def set_result(
+        self,
+        *,
+        is_error: bool,
+        text: str,
+        duration_ms: float,
+        images: int = 0,
+        image_data: Sequence[str] = (),
+    ) -> None:
         mark = "✗" if is_error else "✓"
         colour = ROLE_COLOURS["error"] if is_error else ROLE_COLOURS["tool"]
         suffix = f" · {images} image(s)" if images else ""
@@ -102,6 +111,32 @@ class ToolCallCard(QFrame):
         self.header.setStyleSheet(f"color: {colour.name()};")
         body = pretty_json(text)
         self.detail.setText(elide(body, PREVIEW_CHARS))
+        for stale in self.findChildren(QLabel):
+            if stale.objectName() == "tool-image":
+                stale.setParent(None)
+                stale.deleteLater()
+        for data in image_data[:1]:
+            self._layout.addWidget(self._image_label(data))
+
+    @staticmethod
+    def _image_label(data: str) -> QLabel:
+        """Show the picture the tool returned.
+
+        A card that says "1 image" tells the user there is something to look at
+        and then makes them go and find it. A render is the whole point of
+        asking for one.
+        """
+        import base64
+
+        from PySide6.QtGui import QPixmap
+
+        label = QLabel()
+        label.setObjectName("tool-image")
+        pixmap = QPixmap()
+        if pixmap.loadFromData(base64.b64decode(data), "PNG"):
+            label.setPixmap(pixmap.scaledToWidth(360, Qt.TransformationMode.SmoothTransformation))
+            label.setToolTip("the render this tool returned")
+        return label
 
     def full_text(self) -> str:
         return self.detail.toolTip() or self.detail.text()
@@ -245,12 +280,21 @@ class ChatView(QWidget):
         return card
 
     def finish_tool(
-        self, call_id: str, *, is_error: bool, text: str, duration_ms: float, images: int = 0
+        self,
+        call_id: str,
+        *,
+        is_error: bool,
+        text: str,
+        duration_ms: float,
+        images: int = 0,
+        image_data: Sequence[str] = (),
     ) -> None:
         card = self._cards.get(call_id)
         if card is None:
             return
-        card.set_result(is_error=is_error, text=text, duration_ms=duration_ms, images=images)
+        card.set_result(
+            is_error=is_error, text=text, duration_ms=duration_ms, images=images, image_data=image_data
+        )
         card.detail.setToolTip(pretty_json(text))
         self._scroll_to_end()
 

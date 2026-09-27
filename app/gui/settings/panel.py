@@ -52,8 +52,14 @@ class SettingsPanel(QWidget):
             general_form.addRow(label, widget)
         layout.addWidget(general)
 
-        blender = QGroupBox("Blender (the MCP server)")
+        blender = QGroupBox("MCP server")
         blender_form = QFormLayout(blender)
+        # A studio talks to more than one MCP server -- Blender, and whatever
+        # else a person has configured -- so the server is identified by name
+        # rather than assumed to be the only one. Saving by name is what stops
+        # an edit here from deleting the rest.
+        self.mcp_name = QLineEdit("Blender MCP")
+        self.mcp_name.setPlaceholderText("Blender MCP")
         self.mcp_command = QLineEdit()
         self.mcp_command.setPlaceholderText("/path/to/blender-mcp/.venv/bin/python")
         self.mcp_args = QLineEdit("-m server.main")
@@ -66,6 +72,7 @@ class SettingsPanel(QWidget):
         self.mcp_timeout.setRange(1.0, 600.0)
         self.mcp_timeout.setValue(30.0)
         for label, widget in (
+            ("Name", self.mcp_name),
             ("Python", self.mcp_command),
             ("Arguments", self.mcp_args),
             ("Working directory", self.mcp_cwd),
@@ -73,7 +80,7 @@ class SettingsPanel(QWidget):
             ("Connect timeout (s)", self.mcp_timeout),
         ):
             blender_form.addRow(label, widget)
-        self.save_mcp = QPushButton("Save Blender settings")
+        self.save_mcp = QPushButton("Save this server")
         self.save_mcp.clicked.connect(self._save_mcp)
         blender_form.addRow("", self.save_mcp)
         layout.addWidget(blender)
@@ -134,6 +141,7 @@ class SettingsPanel(QWidget):
     def _save_mcp(self) -> None:
         self.mcp_changed.emit(
             {
+                "name": self.mcp_name.text().strip() or "Blender MCP",
                 "command": self.mcp_command.text().strip(),
                 "args": self.mcp_args.text().split(),
                 "cwd": self.mcp_cwd.text().strip() or None,
@@ -148,6 +156,7 @@ class SettingsPanel(QWidget):
         self.language.setText(settings.language)
         self.log_level.setText(settings.log_level)
         server = settings.mcp_servers[0] if settings.mcp_servers else None
+        self.mcp_name.setText(server.name if server else "Blender MCP")
         if server is not None:
             self.mcp_command.setText(server.command)
             self.mcp_args.setText(" ".join(server.args))

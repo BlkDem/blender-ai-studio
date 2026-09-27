@@ -117,6 +117,9 @@ class AppContext:
     mcp: MCPManager | None = None
     three_d: ThreeDRegistry | None = None
     tasks: TaskManager | None = None
+    #: The project the window is working in, or None for a session that is not
+    #: in one. Every conversation, and every 3D task, is filed under it.
+    current_project: str | None = None
 
     async def open(self) -> AppContext:
         """Migrate the database, load overrides and build the registries."""
@@ -135,7 +138,7 @@ class AppContext:
             self.three_d.provider()
         except ConfigurationError:
             logger.info("no 3D provider selected; the capability will not be offered")
-        self.tasks = TaskManager(self.bus)
+        self.tasks = TaskManager(self.bus, studio=self.studio)
         return self
 
     async def close(self) -> None:
@@ -167,6 +170,8 @@ class AppContext:
         stream: bool = True,
         extra_tools: Sequence[LocalTool] = (),
         budget: Budget | None = None,
+        conversation_id: str = "",
+        project_id: str | None = None,
     ) -> Agent:
         """An agent wired to this studio's MCP servers, tools and budget.
 
@@ -187,6 +192,8 @@ class AppContext:
             local_tools=[*self.assets_tool(), *extra_tools],
             stream=stream,
             studio=self.studio,
+            conversation_id=conversation_id,
+            project_id=project_id if project_id is not None else self.current_project,
         )
 
     def assets_tool(self) -> list[LocalTool]:

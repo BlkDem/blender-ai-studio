@@ -82,7 +82,12 @@ class ToolOutcome:
     error_code: str = ""
     duration_ms: float = 0.0
     blocks: list[Any] = field(default_factory=list)
+    #: base64 payloads, for counting and for showing.
     images: list[str] = field(default_factory=list)
+    #: The same images with their mime type, because a vision model will not
+    #: take a payload without knowing whether it is a PNG or a JPEG. Without it
+    #: the image cannot be sent anywhere, only counted.
+    image_mime_types: list[str] = field(default_factory=list)
 
     def size(self) -> str:
         length = len(self.text)

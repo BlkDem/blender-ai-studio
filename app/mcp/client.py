@@ -252,7 +252,7 @@ class MCPSession:
             ) from exc
 
         duration = (time.perf_counter() - started) * 1000
-        text, blocks, images = _render_result(result)
+        text, blocks, images, mime_types = _render_result(result)
         is_error = bool(getattr(result, "is_error", False))
         code = _error_code(text) if is_error else ""
         if is_error:
@@ -266,6 +266,7 @@ class MCPSession:
             duration_ms=duration,
             blocks=blocks,
             images=images,
+            image_mime_types=mime_types,
         )
 
     async def read_resource(self, uri: str) -> tuple[str, str]:
@@ -309,7 +310,7 @@ class MCPSession:
                 yield self.status
 
 
-def _render_result(result: Any) -> tuple[str, list[Any], list[str]]:
+def _render_result(result: Any) -> tuple[str, list[Any], list[str], list[str]]:
     """Result content into text, plus the blocks and images worth showing.
 
     An MCP server may answer with a structured payload, text, or both;
@@ -320,6 +321,7 @@ def _render_result(result: Any) -> tuple[str, list[Any], list[str]]:
     blocks = list(getattr(result, "content", []) or [])
     texts: list[str] = []
     images: list[str] = []
+    mime_types: list[str] = []
     for block in blocks:
         kind = getattr(block, "type", "")
         if kind == "text":
@@ -328,13 +330,14 @@ def _render_result(result: Any) -> tuple[str, list[Any], list[str]]:
             data = getattr(block, "data", "")
             if data:
                 images.append(data)
+                mime_types.append(str(getattr(block, "mimeType", "") or "image/png"))
     if structured is not None and not texts:
         texts.append(json.dumps(structured, ensure_ascii=False, indent=2))
     elif structured is not None and texts and not texts[0].strip().startswith("{"):
         # Both present and the text is prose: keep the structured payload, it is
         # the part a model can act on.
         texts.append(json.dumps(structured, ensure_ascii=False, indent=2))
-    return "\n".join(text for text in texts if text), blocks, images
+    return "\n".join(text for text in texts if text), blocks, images, mime_types
 
 
 def _truncate(text: str) -> str:

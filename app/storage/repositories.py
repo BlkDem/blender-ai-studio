@@ -458,6 +458,10 @@ class ThreeDTaskRepository:
             "result_url",
             "local_path",
             "error",
+            # A task that has finished and cannot record when it finished is a
+            # task whose duration -- the number a person compares models by --
+            # is unrecoverable after the fact.
+            "finished_at",
         }
         assignments, values = [], []
         for key, value in fields.items():

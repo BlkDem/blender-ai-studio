@@ -13,9 +13,9 @@ imported, so they run in CI without one.
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import time
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -24,15 +24,18 @@ import pytest  # noqa: E402
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
-from app.core.context import AppContext  # noqa: E402
+#: One pixel, so a card can be asked to show a real image.
+_TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
 from app.core.events import Event, EventBus, EventType  # noqa: E402
 from app.core.settings import Settings  # noqa: E402
 from app.gui.benchmark.panel import BenchmarkPanel  # noqa: E402
-from app.gui.bridge import CoreThread, elide, format_duration, format_money  # noqa: E402
+from app.gui.bridge import elide, format_duration, format_money  # noqa: E402
 from app.gui.chat.widget import ChatView  # noqa: E402
-from app.gui.main_window import MainWindow  # noqa: E402
 from app.gui.models.panel import ModelsPanel  # noqa: E402
 from app.gui.scene.panel import ScenePanel  # noqa: E402
 from app.gui.settings.panel import SettingsPanel  # noqa: E402
@@ -376,89 +379,6 @@ def test_scoring_a_run_needs_a_selected_row(qapp) -> None:
 # --- the window, with a real agent -----------------------------------------
 
 
-@pytest.fixture
-async def window(qapp, database_path: Path):
-    """A real window on a real context, with a fake bridge and a scripted model."""
-    from app.core.settings import MCPServerConfig
-    from app.llm.registry import ProviderConfig
-    from app.mcp.manager import MCPManager
-    from app.mcp.models import ToolDescriptor
-
-    class FakeMCP(MCPManager):
-        def tool_specs(self):  # type: ignore[override]
-            from app.llm.base import ToolSpec
-
-            return [ToolSpec(name="blender.get_scene", description="Summarise the scene")]
-
-        def tools(self):  # type: ignore[override]
-            return {"blender.get_scene": ToolDescriptor(name="blender.get_scene", description="Summarise")}
-
-        def tool_instructions(self) -> str:
-            return ""
-
-        async def call_tool(self, name, arguments=None, *, timeout=None):  # type: ignore[override]
-            import json as _json
-
-            from app.mcp.models import ToolOutcome
-
-            if name == "blender.get_scene":
-                return ToolOutcome(
-                    call_id="c",
-                    tool=name,
-                    text=_json.dumps(
-                        {
-                            "scene": "Scene",
-                            "objects": [],
-                            "objects_count": 0,
-                            "objects_shown": 0,
-                            "objects_truncated": False,
-                            "render_engine": "CYCLES",
-                            "frame": 1,
-                        }
-                    ),
-                )
-            return ToolOutcome(call_id="c", tool=name, text=_json.dumps({"ok": True}))
-
-    settings = Settings(data_dir=database_path.parent)
-    settings.mcp_servers = [MCPServerConfig(name="Blender MCP")]
-    settings.llm_providers = [
-        ProviderConfig(
-            name="scripted",
-            kind="mock",
-            default_model="scripted-model",
-            models=[{"id": "scripted-model", "supports_tools": True}],
-        )
-    ]
-    context = await AppContext(settings=settings).open()
-    context.mcp = FakeMCP(context.bus)
-    provider = MockLLMProvider(
-        [
-            ScriptedTurn(tool_calls=[("blender.get_scene", {})]),
-            ScriptedTurn(text="The scene is empty."),
-        ],
-        model="scripted-model",
-    )
-    context.llm.set_provider("scripted", provider)
-
-    core = CoreThread(context)
-    core.start()
-    win = MainWindow(context, core)
-    win.show()
-    win.start()  # the real entry point does this; the model selector fills from it
-    for _ in range(20):
-        qapp.processEvents()
-        await asyncio.sleep(0.01)
-    yield win
-    # Qt tears widgets down at interpreter exit, and a live MainWindow meeting a
-    # dead QApplication segfaults on the way out -- the suite would end in a core
-    # dump with every test green. Close things in the order a person would.
-    await context.close()
-    win.close()
-    win.deleteLater()
-    core.stop()
-    qapp.processEvents()
-
-
 async def test_the_window_runs_a_turn_and_shows_every_step(window, qapp) -> None:
     window.model_selector.setCurrentIndex(0)
     window.send("what is in the scene?")
@@ -593,3 +513,163 @@ async def test_events_from_the_bus_reach_the_window(window, qapp) -> None:
     text = window.chat.transcript_text()
     assert "hello world" in text
     assert "blender.get_scene" in text
+
+
+async def test_saving_one_mcp_server_keeps_the_others(window, qapp) -> None:
+    """Saving the Blender command used to delete every other server.
+
+    A filesystem server configured in .env vanished -- from the settings, the
+    database and the manager -- because the save assigned a one-element list.
+    Someone setting up a second MCP server would have found it gone after
+    opening Settings and pressing Save.
+    """
+    from app.core.settings import MCPServerConfig
+
+    other = MCPServerConfig(name="files", command="/usr/bin/python3", args=["-m", "fs_server"])
+    window.context.settings.mcp_servers = [window.context.settings.mcp_servers[0], other]
+    window.settings.mcp_name.setText("Blender MCP")
+    window.settings.mcp_command.setText("/usr/bin/python3.11")
+
+    await window._save_mcp(  # noqa: SLF001
+        {
+            "name": "Blender MCP",
+            "command": "/usr/bin/python3.11",
+            "args": ["-m", "server.main"],
+            "cwd": "/tmp",
+            "blender_port": 8767,
+            "connect_timeout": 30.0,
+        }
+    )
+
+    names = [s.name for s in window.context.settings.mcp_servers]
+    assert names == ["Blender MCP", "files"], "the other server is still configured"
+    stored = await window.context.studio.settings.all()  # noqa: SLF001
+    assert {s["name"] for s in stored["mcp_servers"]} == {"Blender MCP", "files"}, "and still in the database"
+
+
+async def test_a_new_mcp_server_can_be_added_by_name(window, qapp) -> None:
+    from app.core.settings import MCPServerConfig
+
+    window.context.settings.mcp_servers = [
+        MCPServerConfig(name="Blender MCP", command="/usr/bin/python3.11", args=["-m", "server.main"])
+    ]
+    await window._save_mcp(  # noqa: SLF001
+        {
+            "name": "files",
+            "command": "/usr/bin/python3",
+            "args": ["-m", "fs_server"],
+            "cwd": None,
+            "blender_port": 8765,
+            "connect_timeout": 30.0,
+        }
+    )
+    assert [s.name for s in window.context.settings.mcp_servers] == ["Blender MCP", "files"]
+
+
+async def test_editing_a_server_replaces_it_rather_than_duplicating_it(window, qapp) -> None:
+    from app.core.settings import MCPServerConfig
+
+    window.context.settings.mcp_servers = [
+        MCPServerConfig(name="Blender MCP", command="/old/python", args=["-m", "server.main"])
+    ]
+    await window._save_mcp(  # noqa: SLF001
+        {
+            "name": "Blender MCP",
+            "command": "/new/python",
+            "args": ["-m", "server.main"],
+            "cwd": None,
+            "blender_port": 8765,
+            "connect_timeout": 30.0,
+        }
+    )
+    servers = window.context.settings.mcp_servers
+    assert len(servers) == 1
+    assert servers[0].command == "/new/python"
+
+
+async def test_a_window_keeps_one_conversation_across_turns(window, qapp) -> None:
+    """Each turn used to mint a new conversation.
+
+    The model could not remember anything, while the transcript looked
+    continuous -- so the window showed a memory that was not there. Two turns
+    have to land in one conversation, and be reloadable afterwards.
+    """
+    provider = MockLLMProvider(
+        [
+            ScriptedTurn(tool_calls=[("blender.get_scene", {})]),
+            ScriptedTurn(text="First answer."),
+            ScriptedTurn(text="Second answer."),
+        ],
+        model="scripted-model",
+    )
+    window.context.llm.set_provider("scripted", provider)
+    window.model_selector.setCurrentIndex(0)
+
+    window.send("what is in the scene?")
+    for _ in range(80):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if window.chat.send.isEnabled() and "First answer." in window.chat.transcript_text():
+            break
+    window.send("and now?")
+    for _ in range(80):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if window.chat.send.isEnabled() and "Second answer." in window.chat.transcript_text():
+            break
+
+    conversations = await window.context.studio.conversations.list()  # noqa: SLF001
+    assert len(conversations) == 1, "one conversation, not one per turn"
+    messages = await window.context.studio.messages.list(conversations[0].id)  # noqa: SLF001
+    roles = [m.role for m in messages]
+    # One row per model response, so the turn that called a tool contributes two
+    # assistant messages; what matters is that both user turns are in here, in
+    # one conversation, in order.
+    assert roles[0] == "user" and roles[-1] == "assistant"
+    assert roles.count("user") == 2
+    assert [m.content for m in messages].index("and now?") > [m.content for m in messages].index(
+        "First answer."
+    )
+    assert "Second answer." in messages[-1].content
+
+
+async def test_reopening_the_window_puts_the_transcript_back(window, qapp) -> None:
+    """Every message was in the database and none of it came back."""
+    provider = MockLLMProvider(
+        [ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="Remembered.")],
+        model="scripted-model",
+    )
+    window.context.llm.set_provider("scripted", provider)
+    window.model_selector.setCurrentIndex(0)
+    window.send("what is in the scene?")
+    for _ in range(80):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if window.chat.send.isEnabled() and "Remembered." in window.chat.transcript_text():
+            break
+
+    window.chat.clear()
+    assert window.chat.transcript_text() == ""
+    restored = await window._restore_conversation()  # noqa: SLF001
+    assert restored >= 2
+    text = window.chat.transcript_text()
+    assert "what is in the scene?" in text
+    assert "Remembered." in text, "and the window carries on where it left off"
+
+
+def test_a_tool_card_shows_the_picture_it_returned(qapp) -> None:
+    """A card that says "1 image" makes the user go and find it.
+
+    A render is the reason the tool exists, so the render belongs in the card.
+    """
+    import base64
+
+    from app.gui.chat.widget import ToolCallCard
+
+    png = base64.b64encode(_TINY_PNG).decode()
+    card = ToolCallCard("blender.render_preview")
+    card.set_result(is_error=False, text="{}", duration_ms=2100, images=1, image_data=[png])
+    shown = [w for w in card.findChildren(QLabel) if w.objectName() == "tool-image"]
+    assert shown, "the picture is in the card"
+    assert shown[0].pixmap().width() <= 360, "and scaled to fit the transcript"
+    assert "2.10 s" in card.header.text()

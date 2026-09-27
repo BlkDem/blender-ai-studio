@@ -107,8 +107,8 @@ class Message:
         return cls(role=Role.ASSISTANT, content=text, tool_calls=list(tool_calls))
 
     @classmethod
-    def tool_result(cls, call: ToolCall, content: str) -> Message:
-        return cls(role=Role.TOOL, content=content, tool_call_id=call.id, name=call.name)
+    def tool_result(cls, call: ToolCall, content: str, parts: Sequence[ContentPart] = ()) -> Message:
+        return cls(role=Role.TOOL, content=content, tool_call_id=call.id, name=call.name, parts=list(parts))
 
     def text(self) -> str:
         return self.content or "".join(part.text for part in self.parts if part.type == "text")
@@ -261,15 +261,21 @@ class Usage:
 
 @dataclass(slots=True)
 class ToolResult:
-    """What came back from running a tool, on its way back to the model."""
+    """What came back from running a tool, on its way back to the model.
+
+    ``images`` are the pictures the tool returned -- a render, for instance. They
+    only reach the model if it can see them; otherwise they are carried for the
+    window to display and nothing else.
+    """
 
     call: ToolCall
     content: str
     is_error: bool = False
     error_code: str = ""
+    images: list[ContentPart] = field(default_factory=list)
 
     def message(self) -> Message:
-        return Message.tool_result(self.call, self.content)
+        return Message.tool_result(self.call, self.content, parts=list(self.images))
 
 
 @dataclass(slots=True)

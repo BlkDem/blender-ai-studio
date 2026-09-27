@@ -321,7 +321,24 @@ def _to_wire(message: Message) -> dict[str, Any]:
         if message.reasoning:
             payload["reasoning_content"] = message.reasoning
         return payload
-    return {"role": str(message.role), "content": message.content or message.text()}
+    text = message.content or message.text()
+    if message.parts:
+        # A message with a picture is a list of parts, not a string. The data
+        # URI is the form every OpenAI-compatible server understands, including
+        # llama.cpp and vLLM.
+        content: list[dict[str, Any]] = []
+        if text:
+            content.append({"type": "text", "text": text})
+        content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{part.mime_type or 'image/png'};base64,{part.data or ''}"},
+            }
+            for part in message.parts
+            if part.type == "image"
+        )
+        return {"role": str(message.role), "content": content}
+    return {"role": str(message.role), "content": text}
 
 
 def _parse_completion(payload: dict[str, Any], model_id: str) -> ChatResponse:

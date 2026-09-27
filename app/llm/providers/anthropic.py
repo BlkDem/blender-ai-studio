@@ -254,6 +254,14 @@ class AnthropicProvider(LLMProvider):
         return usage
 
 
+def _image_block(part: Any) -> dict[str, Any]:
+    """One image, in Anthropic's shape."""
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": part.mime_type or "image/png", "data": part.data or ""},
+    }
+
+
 def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
     """Into (system, messages).
 
@@ -274,11 +282,19 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
         if message.role is Role.SYSTEM:
             continue
         if message.role is Role.TOOL:
+            # A tool that returned a picture -- a render -- carries it as an
+            # image block alongside the text. Anthropic wants both inside the
+            # one tool_result, so the model sees the render it asked for.
+            content: Any = message.content
+            if message.parts:
+                blocks_out: list[dict[str, Any]] = [{"type": "text", "text": message.content}]
+                blocks_out.extend(_image_block(part) for part in message.parts if part.type == "image")
+                content = blocks_out
             pending_results.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id or "",
-                    "content": message.content,
+                    "content": content,
                     **({"is_error": True} if message.content.startswith("Error:") else {}),
                 }
             )
@@ -293,6 +309,17 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
                 for call in message.tool_calls
             )
             wire.append({"role": "assistant", "content": blocks})
+        elif message.parts:
+            content_blocks: list[dict[str, Any]] = []
+            if message.text():
+                content_blocks.append({"type": "text", "text": message.text()})
+            content_blocks.extend(_image_block(part) for part in message.parts if part.type == "image")
+            wire.append(
+                {
+                    "role": "assistant" if message.role is Role.ASSISTANT else "user",
+                    "content": content_blocks,
+                }
+            )
         else:
             wire.append(
                 {"role": "assistant" if message.role is Role.ASSISTANT else "user", "content": message.text()}

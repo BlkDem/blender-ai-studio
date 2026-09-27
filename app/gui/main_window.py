@@ -42,13 +42,14 @@ from app.gui.benchmark.panel import BenchmarkPanel
 from app.gui.bridge import CoreThread, format_money
 from app.gui.chat.widget import ChatView
 from app.gui.models.panel import ModelsPanel
+from app.gui.projects.panel import ProjectsPanel
 from app.gui.scene.panel import ScenePanel
 from app.gui.settings.panel import SettingsPanel
 from app.gui.tasks.panel import TasksPanel
 
 logger = logging.getLogger(__name__)
 
-PAGES = ("Chat", "Scene", "Tasks", "Benchmark", "Models", "Settings")
+PAGES = ("Chat", "Scene", "Tasks", "Projects", "Benchmark", "Models", "Settings")
 
 
 class MainWindow(QMainWindow):
@@ -64,6 +65,9 @@ class MainWindow(QMainWindow):
 
         self.current_run_id = ""
         self._active_agent: Any = None
+        self._agent: Any = None
+        self._agent_provider = ""
+        self._conversation_id = ""
         self._cards_by_tool: dict[str, str] = {}
         self._benchmarks = BenchmarkStorage(context.studio.db) if context.studio else None
 
@@ -100,10 +104,19 @@ class MainWindow(QMainWindow):
         self.chat = ChatView()
         self.scene = ScenePanel()
         self.tasks = TasksPanel()
+        self.projects = ProjectsPanel()
         self.benchmark = BenchmarkPanel()
         self.models = ModelsPanel(secrets_backend=context.secrets.backend if context.secrets else "file")
         self.settings = SettingsPanel()
-        for widget in (self.chat, self.scene, self.tasks, self.benchmark, self.models, self.settings):
+        for widget in (
+            self.chat,
+            self.scene,
+            self.tasks,
+            self.projects,
+            self.benchmark,
+            self.models,
+            self.settings,
+        ):
             self.pages.addWidget(widget)
 
         body = QSplitter(Qt.Orientation.Horizontal)
@@ -149,6 +162,11 @@ class MainWindow(QMainWindow):
         self.benchmark.run_requested.connect(self._run_benchmark)
         self.benchmark.cancel_requested.connect(self._cancel_benchmark)
         self.benchmark.review_requested.connect(self._save_review)
+        self.projects.create_requested.connect(self._create_project)
+        self.projects.opened.connect(self._open_project)
+        self.projects.closed.connect(self._close_project)
+        self.projects.delete_requested.connect(self._delete_project)
+        self.projects.blend_requested.connect(self._load_project_blend)
         self.models.select_first()
 
         quit_action = QAction("Quit", self)
@@ -167,8 +185,121 @@ class MainWindow(QMainWindow):
         self.core.attach_bus()
         self.core.submit(self.context.mcp.connect_all(), self._servers_connected)
         self.core.submit(self._load_models(), self._models_loaded)
+        self.core.submit(self.tasks.load_stored(self.context.studio), self._tasks_loaded)
+        self.core.submit(self._restore_conversation(), lambda _n: None)
+        self.core.submit(self._load_projects(), lambda _p: None)
         self.settings.load(self.context.settings)
         self._show_three_d_status()
+
+    # --- projects ----------------------------------------------------------
+
+    async def _load_projects(self) -> list[Any]:
+        if self.context.studio is None:
+            return []
+        projects = await self.context.studio.projects.list()
+        self.projects.show_projects(projects, self.context.current_project)
+        return projects
+
+    async def _create_project(self, name: str, blend: str) -> None:
+        assert self.context.studio is not None
+        project = await self.context.studio.projects.create(
+            name, initial_blend=blend or None, default_model=self.current_model() or None
+        )
+        self.context.current_project = project.id
+        self.projects.clear_inputs()
+        await self._load_projects()
+        self._new_conversation()
+        self.chat.add_note(f"Project '{project.name}' is open. Turns are filed under it.", role="system")
+
+    async def _open_project(self, project_id: str) -> None:
+        assert self.context.studio is not None
+        project = await self.context.studio.projects.get(project_id)
+        if project is None:
+            return
+        self.context.current_project = project.id
+        await self._load_projects()
+        await self._restore_conversation()
+        self.chat.add_note(
+            f"Project '{project.name}' is open"
+            + (f", starting from {project.initial_blend}" if project.initial_blend else "")
+            + ".",
+            role="system",
+        )
+
+    async def _close_project(self) -> None:
+        self.context.current_project = None
+        self._new_conversation()
+        await self._load_projects()
+        self.chat.add_note("Project closed. New turns are not filed anywhere.", role="system")
+
+    async def _delete_project(self, project_id: str) -> None:
+        assert self.context.studio is not None
+        await self.context.studio.projects.delete(project_id)
+        if self.context.current_project == project_id:
+            self.context.current_project = None
+            self._new_conversation()
+        await self._load_projects()
+        self.chat.add_note("Project deleted, with the conversations filed under it.", role="system")
+
+    async def _load_project_blend(self, project_id: str, blend: str) -> None:
+        """Open a project's starting file in Blender, from a copy.
+
+        The original is never opened directly: Blender would then be editing the
+        file the project starts from, and the next run would not start where this
+        one did. The copy is what gets opened, and which of the three things
+        actually happened is reported rather than assumed.
+        """
+        assert self.context.studio is not None and self.context.mcp is not None
+        from app.benchmark.runner import RESET_COPY_ONLY, BenchmarkRunner, ModelSpec
+
+        source = Path(blend)
+        if not source.exists():
+            self.chat.add_note(f"There is no such file: {blend}", role="error")
+            return
+        workdir = self.context.asset_dir().parent / "scenes"
+        runner = BenchmarkRunner(self.context.llm, self.context.mcp, bus=self.context.bus, workdir=workdir)
+        staged = runner.stage_scene(source, ModelSpec(provider="", model="project"), 0)
+        state = await runner.reset_scene(staged)
+        if state == RESET_COPY_ONLY:
+            self.chat.add_note(
+                f"Staged a copy at {staged} but Blender could not open it: "
+                "enable blender.execute_python in Settings, or open the file yourself.",
+                role="error",
+            )
+        else:
+            self.chat.add_note(f"Blender is now on a copy of {source.name}: {staged}", role="system")
+
+    def _new_conversation(self) -> None:
+        """Start a fresh conversation, in whatever project is now open."""
+        self._agent = None
+        self._conversation_id = ""
+
+    async def _restore_conversation(self) -> int:
+        """Put the last conversation back on screen.
+
+        Closing the window used to throw the transcript away even though every
+        message was in the database. Reopening it is what makes the window a
+        workspace rather than a slot machine.
+        """
+        if self.context.studio is None:
+            return 0
+        conversations = await self.context.studio.conversations.list(self.context.current_project)
+        if not conversations:
+            return 0
+        latest = conversations[0]
+        messages = await self.context.studio.messages.list(latest.id)
+        if not messages:
+            return 0
+        self._conversation_id = latest.id
+        self.chat.clear()
+        for message in messages:
+            self.chat.add_message(message.role, message.content or "")
+        return len(messages)
+
+    def _tasks_loaded(self, count: int) -> None:
+        """Say where the rows came from, so an empty table is not a mystery."""
+        if count:
+            self.tasks._refresh_summary(f"{count} from earlier sessions · ")  # noqa: SLF001
 
     def _servers_connected(self, statuses: list[Any]) -> None:
         total = sum(status.tools for status in statuses)
@@ -230,8 +361,23 @@ class MainWindow(QMainWindow):
         self._cards_by_tool.clear()
         self.core.submit(self._run_agent(text), self._run_finished)
 
+    def _agent_for_turn(self) -> Any:
+        """One agent per conversation, not one per turn.
+
+        A new agent every turn meant a new conversation every turn: the model was
+        stateless, and the transcript in the window looked continuous anyway,
+        which is worse than an obvious break -- the user reads a memory that is
+        not there.
+        """
+        if self._agent is None or self._agent_provider != self.current_provider():
+            self._agent = self.context.agent(
+                self.current_provider(), self.current_model(), conversation_id=self._conversation_id
+            )
+            self._agent_provider = self.current_provider()
+        return self._agent
+
     async def _run_agent(self, text: str) -> Any:
-        agent = self.context.agent(self.current_provider(), self.current_model())
+        agent = self._agent_for_turn()
         # Kept so Stop has something to stop. The agent was built and dropped
         # inside this coroutine, which made the button a no-op that still looked
         # like it worked: the run finished, the UI had already said otherwise.
@@ -318,6 +464,7 @@ class MainWindow(QMainWindow):
                 text=payload.get("text", ""),
                 duration_ms=float(payload.get("duration_ms", 0.0) or 0.0),
                 images=int(payload.get("images", 0) or 0),
+                image_data=list(payload.get("image_data", []) or []),
             )
         elif kind is EventType.RUN_STARTED:
             self.current_run_id = payload.get("run_id", event.run_id)
@@ -458,23 +605,34 @@ class MainWindow(QMainWindow):
         self.core.submit(self._save_mcp(fields), self._mcp_saved)
 
     async def _save_mcp(self, fields: dict[str, Any]) -> None:
+        """Upsert one MCP server, by name, and leave the others alone.
+
+        This used to assign a one-element list, which meant that saving the
+        Blender command in the window quietly deleted every other configured
+        server -- from the settings, from the database, and from the manager.
+        A person with a filesystem server configured lost it by clicking Save.
+        """
+        from app.core.context import mcp_server_info
         from app.core.settings import MCPServerConfig
 
         assert self.context.studio is not None and self.context.mcp is not None
         config = MCPServerConfig(
-            name="Blender MCP",
+            name=fields.get("name") or "Blender MCP",
             command=fields["command"],
             args=list(fields["args"]),
             cwd=fields["cwd"],
             blender_port=int(fields["blender_port"]),
             connect_timeout=float(fields["connect_timeout"]),
         )
-        self.context.settings.mcp_servers = [config]
-        await self.context.studio.settings.set("mcp_servers", [config.model_dump()])
+        servers = [
+            config if server.name == config.name else server for server in self.context.settings.mcp_servers
+        ]
+        if all(server.name != config.name for server in servers):
+            servers.append(config)
+        self.context.settings.mcp_servers = servers
+        await self.context.studio.settings.set("mcp_servers", [s.model_dump() for s in servers])
         await self.context.mcp.disconnect_all()
-        from app.core.context import mcp_server_info
-
-        self.context.mcp.configure([mcp_server_info(config)])
+        self.context.mcp.configure([mcp_server_info(s) for s in servers])
         return await self.context.mcp.connect_all()
 
     def _mcp_saved(self, statuses: list[Any]) -> None:

@@ -272,7 +272,7 @@ def test_an_image_block_is_kept_for_the_gui() -> None:
         content = [Block()]
         structured_content = None
 
-    text, _blocks, images = _render_result(Result())
+    text, _blocks, images, _mime = _render_result(Result())
     assert images == ["base64data"]
     assert text == "", "an image-only result has no text to send to the model"
 
@@ -286,7 +286,7 @@ def test_structured_content_is_preferred_over_prose() -> None:
         content = [Block()]
         structured_content = {"objects_count": 3}
 
-    text, _blocks, _images = _render_result(Result())
+    text, _blocks, _images, _mime = _render_result(Result())
     assert "Here is what I found." in text
     assert '"objects_count": 3' in text, "the actionable part must reach the model too"
 

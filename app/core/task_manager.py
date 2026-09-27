@@ -84,12 +84,23 @@ class Task:
 class TaskManager:
     """Starts tasks, tracks them, and publishes their progress."""
 
-    def __init__(self, bus: EventBus | None = None, *, keep: int = 200) -> None:
+    def __init__(
+        self,
+        bus: EventBus | None = None,
+        *,
+        keep: int = 200,
+        studio: Any = None,
+    ) -> None:
         self._bus = bus or EventBus()
         self._tasks: dict[str, Task] = {}
         self._order: list[str] = []
         self._handles: dict[str, asyncio.Task[Any]] = {}
         self._keep = keep
+        #: Where tasks are written when they finish. Optional, because a
+        #: benchmark run and a unit test both want a task manager without a
+        #: database -- but a 3D generation that costs money must not be
+        #: something that only exists until the window closes.
+        self._studio = studio
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -126,6 +137,7 @@ class TaskManager:
             state=TaskState.QUEUED,
         )
         self._remember(task)
+        await self._persist(task)
         self._publish(EventType.TASK_STARTED, **task.to_dict())
         handle = asyncio.create_task(self._execute(task, work), name=task.id)
         self._handles[task.id] = handle
@@ -139,30 +151,35 @@ class TaskManager:
         except asyncio.CancelledError:
             task.state = TaskState.CANCELLED
             task.error = "cancelled"
+            task.finished_at = time.time()
+            await self._persist(task)
             self._publish(EventType.TASK_FAILED, **task.to_dict())
             raise
         except Cancelled as exc:
             task.state = TaskState.CANCELLED
             task.error = exc.message
+            task.finished_at = time.time()
+            await self._persist(task)
             self._publish(EventType.TASK_FAILED, **task.to_dict())
         except Exception as exc:  # noqa: BLE001 - a task's failure is data
             task.state = TaskState.FAILED
+            task.finished_at = time.time()
             # The hint is the actionable half -- which tool to enable, which
             # account to top up -- and a background task has nowhere else to
             # show it. The Tasks panel only ever renders this one string.
             hint = getattr(exc, "hint", "")
             task.error = f"{exc} -- {hint}" if hint else str(exc)
             logger.exception("task %s failed", task.name)
+            await self._persist(task)
             self._publish(EventType.TASK_FAILED, **task.to_dict())
         else:
             task.state = TaskState.SUCCEEDED
             task.progress = 1.0
             task.finished_at = time.time()
+            await self._persist(task)
             self._publish(EventType.TASK_FINISHED, **task.to_dict())
         finally:
             self._handles.pop(task.id, None)
-            if task.state in (TaskState.CANCELLED, TaskState.FAILED) and task.finished_at is None:
-                task.finished_at = time.time()
 
     def update(self, task_id: str, **fields: Any) -> Task | None:
         """Progress from inside a running task."""
@@ -206,6 +223,58 @@ class TaskManager:
         while len(self._order) > self._keep:
             dropped = self._order.pop(0)
             self._tasks.pop(dropped, None)
+
+    async def _persist(self, task: Task) -> None:
+        """Write a 3D task to the database, if there is one and it is a 3D one.
+
+        Only 3D tasks are stored: the table is the 3D task table, and inventing
+        rows in it for a benchmark run would be a lie about what it holds. A
+        failure here is logged and swallowed -- a task that ran must not be
+        reported as failed because its record could not be written.
+        """
+        if self._studio is None:
+            return
+        if str(task.payload.get("kind", "")).startswith(("text_to_3d", "image_to_3d")) is False:
+            return
+        from app.storage.repositories import ThreeDTaskRecord
+
+        existing = task.payload.get("record_id")
+        record = ThreeDTaskRecord(
+            id=existing or f"tdt_{task.id}",
+            run_id=task.run_id,
+            provider=task.provider,
+            kind=str(task.payload.get("kind", "text_to_3d")),
+            prompt=str(task.payload.get("prompt", "")),
+            model=str(task.payload.get("model", "")),
+            status=str(task.state),
+            started_at=task.started_at,
+            provider_task_id=task.payload.get("provider_task_id"),
+            progress=task.progress,
+            credits=int(task.credits),
+            cost_usd=task.cost_usd,
+            result_url=(task.result or {}).get("url") if isinstance(task.result, dict) else None,
+            local_path=(task.result or {}).get("path") if isinstance(task.result, dict) else None,
+            error=task.error or None,
+            finished_at=task.finished_at,
+        )
+        try:
+            if existing:
+                await self._studio.three_d.update(
+                    record.id,
+                    status=record.status,
+                    progress=record.progress,
+                    credits=record.credits,
+                    cost_usd=record.cost_usd,
+                    result_url=record.result_url,
+                    local_path=record.local_path,
+                    error=record.error,
+                    finished_at=record.finished_at,
+                )
+            else:
+                await self._studio.three_d.create(record)
+                task.payload["record_id"] = record.id
+        except Exception:  # noqa: BLE001 - the work matters more than the record
+            logger.exception("could not store task %s", task.id)
 
     def _publish(self, event_type: EventType, **payload: Any) -> None:
         self._bus.emit(event_type, **payload)

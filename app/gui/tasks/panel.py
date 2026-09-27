@@ -13,6 +13,7 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -51,7 +52,13 @@ class TasksPanel(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table, 1)
 
+        self.summary = QLabel("")
+        self.summary.setObjectName("tasks-summary")
+        self.summary.setStyleSheet("color: palette(mid);")
+        layout.addWidget(self.summary)
+
         self._rows: dict[str, int] = {}
+        self._refresh_summary()
 
     def add_or_update(self, task: dict[str, Any]) -> None:
         """Insert or update one row. Called for every TASK_* event."""
@@ -78,6 +85,44 @@ class TasksPanel(QWidget):
             item = QTableWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, task_id)
             self.table.setItem(row, column, item)
+        self._refresh_summary()
+
+    def _refresh_summary(self, note: str = "") -> None:
+        totals = self.totals()
+        text = (
+            f"{self.table.rowCount()} task(s) · {totals['credits']:.0f} 3D credits · "
+            f"{format_money(totals['cost_usd'])}"
+        )
+        self.summary.setText(f"{note}{text}" if note else text)
+
+    async def load_stored(self, studio: Any, limit: int = 50) -> int:
+        """Show the 3D tasks this studio already knows about.
+
+        Without this the table only ever held what happened since the window
+        opened, so closing the app lost every generation, its credits and its
+        cost from view -- the one record a person paid for.
+        """
+        if studio is None:
+            return 0
+        records = await studio.three_d.list(limit=limit)
+        for record in records:
+            self.add_or_update(
+                {
+                    "id": record.id,
+                    "name": f"3D: {record.prompt[:44]}" if record.prompt else "3D generation",
+                    "provider": record.provider,
+                    "state": record.status,
+                    "progress": record.progress,
+                    "started_at": record.started_at,
+                    "duration_s": (record.finished_at or 0.0) - record.started_at
+                    if record.finished_at
+                    else 0.0,
+                    "credits": record.credits,
+                    "cost_usd": record.cost_usd,
+                    "error": record.error or "",
+                }
+            )
+        return len(records)
 
     def _cancel_selected(self) -> None:
         selected = self.table.selectedItems()
@@ -94,6 +139,7 @@ class TasksPanel(QWidget):
                 self.table.removeRow(row)
                 self._rows.pop(task_id, None)
         self._rows = {task_id: row for task_id, row in self._rows.items() if row < self.table.rowCount()}
+        self._refresh_summary()
 
     def totals(self) -> dict[str, float]:
         """Credits and cost in the table, summed."""

@@ -30,6 +30,7 @@ from app.core.events import Event, EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
     ChatResponse,
+    ContentPart,
     LLMProvider,
     Message,
     Role,
@@ -125,6 +126,7 @@ class Agent:
         max_result_chars: int = 8000,
         studio: Any = None,
         conversation_id: str = "",
+        project_id: str | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -146,6 +148,7 @@ class Agent:
         #: user cannot scroll back through is not a conversation.
         self.studio = studio
         self.conversation_id = conversation_id
+        self.project_id = project_id
         self._runs: dict[str, asyncio.Task[Any]] = {}
         #: Whether a transaction this agent opened is still open. Tracked here
         #: rather than asked of the add-on, because the agent began every
@@ -404,6 +407,9 @@ class Agent:
         )
         local = self._local_tool(call.name)
         error_code = ""
+        # A local tool hands back bare image payloads; only an MCP one knows
+        # their mime type.
+        mime_types: list[str] = []
         try:
             if local is not None:
                 outcome_text, images, credits, usd = await self._run_local(local, call, result)
@@ -412,6 +418,7 @@ class Agent:
                 outcome = await self.mcp.call_tool(call.name, call.arguments)
                 outcome_text = outcome.text
                 images = outcome.images
+                mime_types = outcome.image_mime_types
                 is_error = outcome.is_error
                 error_code = outcome.error_code
                 credits = usd = 0.0
@@ -447,10 +454,35 @@ class Agent:
             is_error=is_error,
             text=body,
             images=len(images),
+            image_data=images[:2],
             duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
         self._publish(run_id, EventType.COST, **self.cost.totals.to_dict())
-        return ToolResult(call=call, content=body, is_error=is_error)
+        return ToolResult(
+            call=call, content=body, is_error=is_error, images=self._image_parts(images, mime_types)
+        )
+
+    def _image_parts(self, images: list[str], mime_types: list[str]) -> list[ContentPart]:
+        """Attach a tool's pictures to the next request, if this model can see.
+
+        A render is the one tool result a model can act on without parsing text,
+        and the flag is asked rather than assumed: sending an image to a text-only
+        model is a request it will reject, and the run dies on a capability the
+        user never asked about.
+        """
+        if not images:
+            return []
+        if not getattr(self.cost.price(), "supports_vision", False):
+            logger.info(
+                "%s cannot see images; %d picture(s) from the tool are shown, not sent",
+                self.model,
+                len(images),
+            )
+            return []
+        return [
+            ContentPart.image_part(data, mime_types[index] if index < len(mime_types) else "image/png")
+            for index, data in enumerate(images)
+        ]
 
     def _with_recovery_hint(self, tool: str, error_code: str, text: str) -> str:
         """Turn one refusal into a step the model can take.
@@ -533,7 +565,10 @@ class Agent:
         """
         if self.conversation_id:
             return self.conversation_id
-        conversation = await self.studio.conversations.create(None, "")
+        # A conversation belongs to a project. Without this the column is always
+        # NULL, the cascade on project deletion never fires, and "which project
+        # was this conversation in" has no answer.
+        conversation = await self.studio.conversations.create(self.project_id, "")
         self.conversation_id = conversation.id
         return self.conversation_id
 
