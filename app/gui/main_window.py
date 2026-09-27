@@ -510,9 +510,7 @@ class MainWindow(QMainWindow):
         tasks = [BenchmarkTask(prompt=prompt) for prompt in prompts]
         self.benchmark.run_button.setEnabled(False)
         self.benchmark.cancel_button.setEnabled(True)
-        self.core.submit(
-            self._benchmark(tasks, specs, blend), lambda comparison: self._benchmark_done(comparison)
-        )
+        self.core.submit(self._benchmark(tasks, specs, blend), self._benchmark_done)
 
     async def _benchmark(self, tasks: list[BenchmarkTask], models: list[ModelSpec], blend: str) -> Any:
         assert self.context.mcp is not None
@@ -523,12 +521,47 @@ class MainWindow(QMainWindow):
             bus=self.context.bus,
             system_prompt=self.context.settings.agent.system_prompt,
         )
-        return await runner.run_suite(tasks, models, blend=Path(blend) if blend else None)
+        # Saved as each run finishes, not at the end: a benchmark cancelled
+        # half-way is still three runs somebody may want to look at.
+        run_ids: list[str] = []
 
-    def _benchmark_done(self, comparison: Any) -> None:
+        async def persist(comparison: Any, outcome: Any) -> None:
+            if self._benchmarks is None or not suite_id:
+                return
+            run_ids.append(await self._benchmarks.save_run(suite_id, outcome, task_index=len(run_ids)))
+
+        suite_id = ""
+        if self._benchmarks is not None:
+            prompts = ", ".join(task.prompt for task in tasks)[:120]
+            models_label = ", ".join(spec.label() for spec in models)
+            suite_id = await self._benchmarks.create_suite(
+                name=f"{len(models)} model(s) x {len(tasks)} task(s)",
+                description=f"{models_label} -- {prompts}",
+            )
+        comparison = await runner.run_suite(
+            tasks, models, blend=Path(blend) if blend else None, persist=persist
+        )
+        return comparison, run_ids, suite_id
+
+    def _benchmark_done(self, result: Any) -> None:
+        if not isinstance(result, tuple):  # pragma: no cover - defensive
+            result = (result, [], "")
+        comparison, run_ids, suite_id = result
         self.benchmark.run_button.setEnabled(True)
         self.benchmark.cancel_button.setEnabled(False)
-        self.benchmark.show_comparison([outcome.row() | {"id": ""} for outcome in comparison.outcomes])
+        rows = []
+        for index, outcome in enumerate(comparison.outcomes):
+            run_id = run_ids[index] if index < len(run_ids) else ""
+            rows.append(outcome.row() | {"id": run_id})
+        self.benchmark.show_comparison(rows)
+        if not run_ids:
+            self.benchmark.summary.setText(
+                self.benchmark.summary.text() + " Nothing was saved, so these runs cannot be scored."
+            )
+        else:
+            self.benchmark.summary.setText(
+                self.benchmark.summary.text() + f" Saved as suite {suite_id}; score a row to keep a review."
+            )
         if comparison.outcomes and comparison.fastest() is not None:
             # Reported as a fact about the run, not as a recommendation.
             self.benchmark.summary.setText(

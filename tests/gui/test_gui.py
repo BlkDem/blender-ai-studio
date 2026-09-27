@@ -23,6 +23,7 @@ import pytest  # noqa: E402
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.core.context import AppContext  # noqa: E402
@@ -530,6 +531,43 @@ async def test_stopping_reaches_the_agent_that_is_actually_running(window, qapp)
     assert not agent.is_running(run_id), "the agent was cancelled, not just forgotten by the window"
     assert window.chat.send.isEnabled() is True
     never_finishes.set()
+
+
+async def test_a_benchmark_run_is_saved_so_it_can_be_scored(window, qapp) -> None:
+    """The table used to be given empty ids.
+
+    Scoring a row then wrote nothing, silently: the panel looked complete and
+    the reviews table stayed empty. The whole point of a manual review is that
+    the row it reviews is the row that was run.
+    """
+    window.benchmark.prompts.setPlainText("what is in the scene?")
+    window.model_selector.setCurrentIndex(0)
+    window._run_benchmark("", "scripted:scripted-model")  # noqa: SLF001
+    for _ in range(120):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if window.benchmark.run_button.isEnabled() and window.benchmark.table.rowCount():
+            break
+    await asyncio.sleep(0.1)
+    qapp.processEvents()
+
+    assert window.benchmark.table.rowCount() == 1
+    row_id = window.benchmark.table.item(0, 0).data(Qt.ItemDataRole.UserRole)
+    assert row_id, "the row carries the id of a run that exists"
+
+    suites = await window._benchmarks.suites()  # noqa: SLF001
+    assert suites and suites[0]["runs"] == 1
+    runs = await window._benchmarks.runs(suites[0]["id"])  # noqa: SLF001
+    assert runs[0]["id"] == row_id
+
+    window._save_review(row_id, {"Overall": "4", "notes": "clear"})  # noqa: SLF001
+    for _ in range(60):
+        qapp.processEvents()
+        await asyncio.sleep(0.02)
+        if "Score saved" in window.benchmark.summary.text():
+            break
+    reviews = await window._benchmarks.reviews(row_id)  # noqa: SLF001
+    assert reviews and reviews[0]["overall"] == 4, "the score reached the database"
 
 
 async def test_events_from_the_bus_reach_the_window(window, qapp) -> None:
