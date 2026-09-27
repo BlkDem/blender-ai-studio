@@ -132,7 +132,17 @@ class BenchmarkStorage:
             """INSERT INTO benchmark_reviews
                (id, run_id, geometry, materials, instruction_following, composition, overall, notes, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (review_id, run_id, geometry, materials, instruction_following, composition, overall, notes, time.time()),
+            (
+                review_id,
+                run_id,
+                geometry,
+                materials,
+                instruction_following,
+                composition,
+                overall,
+                notes,
+                time.time(),
+            ),
         )
         return review_id
 

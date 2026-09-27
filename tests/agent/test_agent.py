@@ -9,19 +9,18 @@ should.
 from __future__ import annotations
 
 import asyncio
-import json
+from typing import Any
 
 import pytest
 
 from app.core.agent import BASE_SYSTEM_PROMPT, Agent, LocalTool
 from app.core.cost import Budget
-from app.core.errors import Cancelled
 from app.core.events import EventBus, EventType
-from app.llm.base import ChatRequest, Message, ToolCall
+from app.llm.base import Message
 from app.llm.models import ModelInfo
 from app.llm.providers.mock import MockLLMProvider, ScriptedTurn
 from app.mcp.manager import MCPManager
-from app.mcp.models import ConnectionState, ServerInfo, ToolDescriptor
+from app.mcp.models import ToolDescriptor
 
 
 class FakeMCP(MCPManager):
@@ -74,14 +73,14 @@ def mcp() -> FakeMCP:
     return FakeMCP()
 
 
-def agent_with(
-    mcp: FakeMCP, *turns: ScriptedTurn, **kwargs
-) -> Agent:
-    provider = MockLLMProvider(list(turns), models=[ModelInfo(id="mock-model", provider="mock", input_price=1.0, output_price=2.0)])
-    defaults = dict(
-        bus=EventBus(),
-        model_info=ModelInfo(id="mock-model", provider="mock", input_price=1.0, output_price=2.0),
+def agent_with(mcp: FakeMCP, *turns: ScriptedTurn, **kwargs) -> Agent:
+    provider = MockLLMProvider(
+        list(turns), models=[ModelInfo(id="mock-model", provider="mock", input_price=1.0, output_price=2.0)]
     )
+    defaults: dict[str, Any] = {
+        "bus": EventBus(),
+        "model_info": ModelInfo(id="mock-model", provider="mock", input_price=1.0, output_price=2.0),
+    }
     defaults.update(kwargs)
     return Agent(provider, "mock-model", mcp, **defaults)
 
@@ -207,10 +206,22 @@ async def test_a_users_prompt_is_added_not_substituted(mcp: FakeMCP) -> None:
     assert "Always use metric units." in content
 
 
-async def test_the_available_tools_are_listed_for_the_model(mcp: FakeMCP) -> None:
+async def test_the_tool_catalog_is_not_repeated_in_the_prompt(mcp: FakeMCP) -> None:
+    """It already travels in the request's ``tools`` field.
+
+    Listing it again in the system prompt cost a few hundred tokens on every
+    request of a run, which on a real run was more input tokens than the whole
+    conversation: 30k for five requests, most of it a duplicate catalogue.
+    """
     agent = agent_with(mcp, ScriptedTurn(text="hi"))
     await agent.run("hello")
-    assert "blender.get_scene" in agent.provider.requests[0].messages[0].content
+    request = agent.provider.requests[0]
+    system = request.messages[0].content
+    assert "Tools available now" not in system
+    assert "- blender.get_scene" not in system, "no catalogue line in the prompt"
+    assert [spec.name for spec in request.tools] == ["blender.get_scene"], "the tools field carries it"
+    assert request.tools[0].description, "with its description and schema"
+    assert "Prefer get_scene before changing anything." in system, "the server's own notes still are"
 
 
 def test_a_local_tool_joins_the_mcp_ones(mcp: FakeMCP) -> None:
@@ -281,8 +292,14 @@ async def test_the_tool_call_limit_stops_a_loop(mcp: FakeMCP) -> None:
 async def test_the_cost_limit_stops_a_run(mcp: FakeMCP) -> None:
     # 1000 input + 1000 output at $1/$2 per million is $0.003 per call, so a
     # one-cent cap is reached within a few steps.
-    rich = ScriptedTurn(tool_calls=[("blender.get_scene", {})], usage=type("U", (), {
-        "input_tokens": 1_000_000, "output_tokens": 1_000_000, "cached_tokens": 0, "cost_usd": 0.0})())
+    rich = ScriptedTurn(
+        tool_calls=[("blender.get_scene", {})],
+        usage=type(
+            "U",
+            (),
+            {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "cached_tokens": 0, "cost_usd": 0.0},
+        )(),
+    )
     agent = agent_with(mcp, *[rich for _ in range(5)], budget=Budget(max_steps=10, max_session_cost=0.005))
     result = await agent.run("expensive")
     assert "cost" in result.stopped_because
@@ -290,12 +307,81 @@ async def test_the_cost_limit_stops_a_run(mcp: FakeMCP) -> None:
 
 async def test_a_single_expensive_request_stops_the_run(mcp: FakeMCP) -> None:
     """One enormous response is enough; the run does not have to loop to hurt."""
-    huge = ScriptedTurn(text="expensive", usage=type("U", (), {
-        "input_tokens": 10_000_000, "output_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0})())
+    huge = ScriptedTurn(
+        text="expensive",
+        usage=type(
+            "U", (), {"input_tokens": 10_000_000, "output_tokens": 0, "cached_tokens": 0, "cost_usd": 0.0}
+        )(),
+    )
     agent = agent_with(mcp, huge, budget=Budget(max_request_cost=1.0))
     result = await agent.run("too much")
     assert result.finished is False
     assert "single request" in result.stopped_because
+
+
+def transactional_mcp() -> FakeMCP:
+    """A bridge that actually offers the transaction tools."""
+    from app.mcp.models import ToolDescriptor
+
+    return FakeMCP(
+        {
+            "blender.get_scene": ToolDescriptor(name="blender.get_scene", description="Summarise"),
+            "blender.begin_transaction": ToolDescriptor(
+                name="blender.begin_transaction", description="Start one"
+            ),
+            "blender.commit_transaction": ToolDescriptor(
+                name="blender.commit_transaction", description="Keep it"
+            ),
+            "blender.rollback_transaction": ToolDescriptor(
+                name="blender.rollback_transaction", description="Undo it"
+            ),
+        }
+    )
+
+
+async def test_a_run_that_stops_mid_transaction_says_so() -> None:
+    """A leftover transaction makes the *next* run's begin fail with no obvious
+    cause, so the run that left it has to say so."""
+    bus = EventBus()
+    agent = agent_with(
+        transactional_mcp(),
+        ScriptedTurn(tool_calls=[("blender.begin_transaction", {})]),
+        *[ScriptedTurn(tool_calls=[("blender.get_scene", {})]) for _ in range(5)],
+        budget=Budget(max_steps=2),
+        bus=bus,
+    )
+    await agent.run("build something", run_id="run_tx")
+
+    finished = [e for e in bus.history("run_tx") if e.type is EventType.RUN_FAILED]
+    assert finished
+    assert finished[0].payload["transaction_open"] is True
+    assert "commit it to keep the work" in finished[0].payload["hint"]
+    assert agent.transaction_warning().startswith("A transaction from this run is still open")
+
+
+async def test_a_closed_transaction_carries_no_warning() -> None:
+    agent = agent_with(
+        transactional_mcp(),
+        ScriptedTurn(tool_calls=[("blender.begin_transaction", {})]),
+        ScriptedTurn(tool_calls=[("blender.commit_transaction", {})]),
+        ScriptedTurn(text="done"),
+    )
+    result = await agent.run("build and keep")
+    assert result.finished
+    assert agent.transaction_warning() == ""
+
+
+async def test_a_failed_begin_does_not_claim_a_transaction() -> None:
+    failing = transactional_mcp()
+    failing.outcomes["blender.begin_transaction"] = ("failed (TRANSACTION_ACTIVE)", True)
+    agent = agent_with(
+        failing,
+        ScriptedTurn(tool_calls=[("blender.begin_transaction", {})]),
+        ScriptedTurn(text="I cannot start a transaction."),
+    )
+    result = await agent.run("begin")
+    assert any(c.is_error for c in result.tool_calls)
+    assert agent.transaction_warning() == "", "nothing of ours is open, so nothing to warn about"
 
 
 async def test_the_wall_clock_limit_is_enforced(mcp: FakeMCP) -> None:
@@ -327,8 +413,9 @@ async def test_a_budget_stop_is_published_with_a_reason(mcp: FakeMCP) -> None:
 
 
 async def test_usage_is_priced_and_accumulated(mcp: FakeMCP) -> None:
-    usage = type("U", (), {"input_tokens": 1_000_000, "output_tokens": 1_000_000,
-                           "cached_tokens": 0, "cost_usd": 0.0})()
+    usage = type(
+        "U", (), {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "cached_tokens": 0, "cost_usd": 0.0}
+    )()
     agent = agent_with(mcp, ScriptedTurn(text="hi", usage=usage))
     result = await agent.run("hello")
     assert result.totals.llm_usd == pytest.approx(3.0), "$1/M input + $2/M output"
@@ -353,9 +440,7 @@ async def test_three_d_credits_are_kept_out_of_the_llm_bill(mcp: FakeMCP) -> Non
 
 async def test_tool_calls_are_counted(mcp: FakeMCP) -> None:
     mcp.outcomes["blender.get_scene"] = ("nope", True)
-    agent = agent_with(
-        mcp, ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="ok")
-    )
+    agent = agent_with(mcp, ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="ok"))
     result = await agent.run("go")
     assert result.totals.tool_calls == 1
     assert result.totals.tool_errors == 1
@@ -406,7 +491,9 @@ async def test_cancellation_is_published(mcp: FakeMCP) -> None:
             await asyncio.sleep(10)
             raise AssertionError
 
-    agent = agent_with(Blocking(), *[ScriptedTurn(tool_calls=[("blender.get_scene", {})]) for _ in range(5)], bus=bus)
+    agent = agent_with(
+        Blocking(), *[ScriptedTurn(tool_calls=[("blender.get_scene", {})]) for _ in range(5)], bus=bus
+    )
     task = asyncio.create_task(agent.run("go", run_id="run_c"))
     await asyncio.sleep(0.05)
     agent.cancel("run_c")
@@ -447,9 +534,7 @@ async def test_history_is_carried_into_the_next_turn(mcp: FakeMCP) -> None:
 async def test_assistant_tool_calls_are_replayed_so_the_model_keeps_its_thread(
     mcp: FakeMCP,
 ) -> None:
-    agent = agent_with(
-        mcp, ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="done")
-    )
+    agent = agent_with(mcp, ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="done"))
     await agent.run("go")
     second = agent.provider.requests[1].messages
     assistant = next(m for m in second if m.role.value == "assistant" and m.tool_calls)

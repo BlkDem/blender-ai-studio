@@ -281,6 +281,13 @@ only where both are real money, and always shows the split.
 | `agent.max_3d_credits` | 200 | a plan that would spend real credits |
 | `agent.allow_execute_python` | off | the one tool that can do anything |
 
+A run that stops between `begin_transaction` and `commit` leaves the transaction
+open, and the *next* run's `begin_transaction` is then refused with
+`TRANSACTION_ACTIVE` — a failure with no obvious cause. The agent therefore tracks
+its own transactions and says so when a run ends with one open, and the Scene
+panel has a **Commit transaction** / **Roll back transaction** button. Both outcomes
+destroy something, so neither is done for you.
+
 A run that reaches a limit stops with a reason in the transcript and a
 `RUN_FAILED` event, and the usage that was already spent is still recorded — a
 cost report that omits the expensive request is the one report that cannot be
@@ -321,13 +328,44 @@ The live acceptance run — a real agent, a real MCP server, a real Blender:
     --blender-mcp /path/to/blender-mcp --python /path/to/python
 ```
 
-It creates a cube at 2,0,1, moves it to 3,3,1, and verifies both with second
-tool calls. With no API key it drives a scripted planner, so everything except a
-model's judgement is exercised; with `--provider` it uses a real model.
+It creates a cube at 2,0,1, moves it, and verifies both with second tool calls.
+With no API key it drives a scripted planner, so everything except a model's
+judgement is exercised; with `--provider` it uses a real model.
+
+Verified against a real model — Qwen2.5-3B-Instruct served by `llama.cpp` on
+`http://127.0.0.1:11400/v1`, talking to a live Blender 5.2 GUI over MCP. The model
+chose its own sequence (`get_scene` → `begin_transaction` → `create_object` →
+`commit_transaction`), and the run passed all 23 checks. Note what the second
+check asserts: the object ends up where *the model asked*, not where the prompt
+said. A 3B model reading "3, 3, 1" as (3, 0, 1) is a finding about the model, and
+measuring prompt-following is the benchmark's job.
+
+To run the same thing locally, for free:
+
+```bash
+# 1. a model server (16 MB binary, no key needed)
+curl -L -o llama.tar.gz \
+  https://github.com/ggml-org/llama.cpp/releases/download/b11217/llama-b11217-bin-ubuntu-x64.tar.gz
+tar xzf llama.tar.gz
+./llama-b11217/llama-server -m qwen2.5-3b-q4.gguf --alias local-qwen \
+  --jinja --port 11400 --ctx-size 8192
+
+# 2. the acceptance run against it
+.venv/bin/python examples/acceptance_run.py --data-dir /tmp/studio \
+  --provider localqwen --base-url http://127.0.0.1:11400/v1 --model local-qwen \
+  --blender-mcp /path/to/blender-mcp --port 8767
+
+# 3. or photograph the window mid-run
+.venv/bin/python examples/gui_shot.py --blender-mcp /path/to/blender-mcp \
+  --provider localqwen --base-url http://127.0.0.1:11400/v1 --model local-qwen
+```
+
+`--jinja` matters: it is what makes the server use the model's own chat template,
+and therefore what makes tool calling work.
 
 ## Testing
 
-209 tests, no network and no Blender needed for the majority.
+219 tests, no network and no Blender needed for the majority.
 
 | Area | What is covered |
 |---|---|

@@ -56,10 +56,16 @@ class GeminiProvider(LLMProvider):
         self.default_model_id = model
         self.model_catalog = models or [
             ModelInfo(
-                id=model, provider=self.name, display_name=model,
-                supports_vision=True, supports_images=True, supports_thinking=True,
-                context_window=1_000_000, max_output_tokens=8192,
-                input_price=0.30, output_price=2.50,
+                id=model,
+                provider=self.name,
+                display_name=model,
+                supports_vision=True,
+                supports_images=True,
+                supports_thinking=True,
+                context_window=1_000_000,
+                max_output_tokens=8192,
+                input_price=0.30,
+                output_price=2.50,
             )
         ]
         self.timeout = timeout
@@ -89,9 +95,7 @@ class GeminiProvider(LLMProvider):
         if request.stop:
             config["stopSequences"] = request.stop
         if request.tools:
-            config["tools"] = [
-                {"functionDeclarations": [tool.to_gemini() for tool in request.tools]}
-            ]
+            config["tools"] = [{"functionDeclarations": [tool.to_gemini() for tool in request.tools]}]
             if request.tool_choice == "any":
                 config["tool_calling_config"] = {"mode": "ANY"}
             elif request.tool_choice == "none":
@@ -163,9 +167,7 @@ class GeminiProvider(LLMProvider):
                                     arguments=call.get("args") or {},
                                 )
                                 calls.append(tool)
-                                yield StreamChunk(
-                                    type="tool_start", call_id=tool.id, name=tool.name
-                                )
+                                yield StreamChunk(type="tool_start", call_id=tool.id, name=tool.name)
                                 yield StreamChunk(
                                     type="tool_end",
                                     call_id=tool.id,
@@ -181,9 +183,7 @@ class GeminiProvider(LLMProvider):
         if not usage_sent:
             usage_sent = True
             yield StreamChunk(type="usage", usage=usage)
-        yield StreamChunk(
-            type="end", text="".join(text), finish_reason=finish, reasoning="".join(reasoning)
-        )
+        yield StreamChunk(type="end", text="".join(text), finish_reason=finish, reasoning="".join(reasoning))
         logger.debug("%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000)
 
     def price(self, model_id: str, usage: Usage) -> Usage:
@@ -249,10 +249,13 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
         parts: list[dict[str, Any]] = []
         if message.role is Role.ASSISTANT and message.tool_calls:
             for call in message.tool_calls:
-                part: dict[str, Any] = {"functionCall": {"name": call.name, "args": call.arguments}}
+                # Not named `part`: an annotated assignment fixes the name's type
+                # for the whole function, which would then be wrong for the
+                # ContentPart loop below.
+                call_part: dict[str, Any] = {"functionCall": {"name": call.name, "args": call.arguments}}
                 if call.id:
-                    part["functionCall"]["id"] = call.id
-                parts.append(part)
+                    call_part["functionCall"]["id"] = call.id
+                parts.append(call_part)
             if message.content:
                 parts.insert(0, {"text": message.content})
         else:
@@ -262,10 +265,11 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
                         {"inlineData": {"mimeType": part.mime_type or "image/png", "data": part.data}}
                     )
                 elif part.text:
-                    text: dict[str, Any] = {"text": part.text}
-                    if part.extra:
-                        text.update(part.extra)
-                    parts.append(text)
+                    piece: dict[str, Any] = {"text": part.text}
+                    # A thought signature, or anything else the provider wants
+                    # echoed verbatim on the next turn.
+                    piece.update(part.extra)
+                    parts.append(piece)
             if not parts and message.content:
                 parts = [{"text": message.content}]
         if parts:

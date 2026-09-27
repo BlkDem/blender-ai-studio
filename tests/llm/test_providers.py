@@ -14,10 +14,12 @@ import httpx
 import pytest
 
 from app.core.errors import AuthenticationError, ProviderError, RateLimitError
-from app.llm.base import ChatRequest, Message, Role, ToolCall, ToolSpec
+from app.llm.base import ChatRequest, Message, ToolCall, ToolSpec
 from app.llm.models import ModelInfo, cost_of
-from app.llm.providers.anthropic import AnthropicProvider, _to_wire as anthropic_wire
-from app.llm.providers.gemini import GeminiProvider, _to_wire as gemini_wire
+from app.llm.providers.anthropic import AnthropicProvider
+from app.llm.providers.anthropic import _to_wire as anthropic_wire
+from app.llm.providers.gemini import GeminiProvider
+from app.llm.providers.gemini import _to_wire as gemini_wire
 from app.llm.providers.openai_compatible import OpenAICompatibleProvider, _to_wire
 
 
@@ -52,7 +54,9 @@ async def test_a_chat_request_is_built_the_way_openai_expects() -> None:
         ChatRequest(
             messages=[Message.system("be brief"), Message.user("hello")],
             model="m",
-            tools=[ToolSpec("t", "does a thing", {"type": "object", "properties": {"a": {"type": "string"}}})],
+            tools=[
+                ToolSpec("t", "does a thing", {"type": "object", "properties": {"a": {"type": "string"}}})
+            ],
         )
     )
 
@@ -148,7 +152,10 @@ async def test_streaming_yields_text_then_the_finished_tool_call() -> None:
         return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
 
     provider = provider_with(handler)
-    received = [chunk async for chunk in provider.stream(ChatRequest(messages=[], model="m", tools=[ToolSpec("get_scene")]))]
+    received = [
+        chunk
+        async for chunk in provider.stream(ChatRequest(messages=[], model="m", tools=[ToolSpec("get_scene")]))
+    ]
 
     text = "".join(c.text for c in received if c.type == "text")
     assert text == "Looking"
@@ -180,7 +187,7 @@ async def test_reasoning_text_is_read_from_either_field() -> None:
 
     def handler(field: str) -> Any:
         def inner(request: httpx.Request) -> httpx.Response:
-            body = f'data: {json.dumps({"choices": [{"delta": {field: "thinking..."}}]})}\n\ndata: [DONE]\n\n'
+            body = f"data: {json.dumps({'choices': [{'delta': {field: 'thinking...'}}]})}\n\ndata: [DONE]\n\n"
             return httpx.Response(200, text=body)
 
         return inner
@@ -298,7 +305,9 @@ async def test_anthropic_parses_tool_use_and_usage() -> None:
             },
         )
 
-    response = await anthropic_with(handler).chat(ChatRequest(messages=[Message.user("go")], model="claude-test"))
+    response = await anthropic_with(handler).chat(
+        ChatRequest(messages=[Message.user("go")], model="claude-test")
+    )
     assert response.text == "Let me look"
     assert response.tool_calls[0].id == "tu_1"
     assert response.tool_calls[0].arguments == {"object_limit": 5}
@@ -318,8 +327,16 @@ async def test_anthropic_assembles_streamed_tool_arguments() -> None:
             "index": 1,
             "content_block": {"type": "tool_use", "id": "tu_9", "name": "create_object"},
         },
-        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"type"'}},
-        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": ': "cube"}'}},
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"type"'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": ': "cube"}'},
+        },
         {"type": "content_block_stop", "index": 1},
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 25}},
         {"type": "message_stop"},
@@ -423,8 +440,10 @@ async def test_gemini_parses_function_calls_and_usage() -> None:
 async def test_gemini_streaming_does_not_repeat_accumulated_text() -> None:
     events = [
         {"candidates": [{"content": {"parts": [{"text": "Hello"}]}}]},
-        {"candidates": [{"content": {"parts": [{"text": "Hello there"}]}, "finishReason": "STOP"}],
-         "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3}},
+        {
+            "candidates": [{"content": {"parts": [{"text": "Hello there"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3},
+        },
     ]
     body = "".join(f"data: {json.dumps(e)}\n\n" for e in events)
 
@@ -454,7 +473,13 @@ def test_cached_input_is_billed_at_the_cheaper_rate() -> None:
 def test_an_unknown_model_costs_nothing_rather_than_a_guess() -> None:
     """A made-up price on a benchmark table is worse than a blank one."""
     provider = OpenAICompatibleProvider(api_key="k", model="m")
-    assert provider.price("never-heard-of-it", type("U", (), {"input_tokens": 10, "output_tokens": 10, "cached_tokens": 0, "cost_usd": 0.0})()).cost_usd == 0.0
+    assert (
+        provider.price(
+            "never-heard-of-it",
+            type("U", (), {"input_tokens": 10, "output_tokens": 10, "cached_tokens": 0, "cost_usd": 0.0})(),
+        ).cost_usd
+        == 0.0
+    )
 
 
 def test_model_info_round_trips_through_a_dict() -> None:

@@ -164,7 +164,9 @@ class MockLLMProvider(LLMProvider):
             # by default rather than only by the provider tests.
             serialised = json.dumps(arguments)
             for index in range(0, len(serialised), 7):
-                yield StreamChunk(type="tool_delta", call_id=call.id, name=call.name, partial=serialised[index : index + 7])
+                yield StreamChunk(
+                    type="tool_delta", call_id=call.id, name=call.name, partial=serialised[index : index + 7]
+                )
             yield StreamChunk(type="tool_end", call_id=call.id, name=call.name, arguments=arguments)
         usage = turn.usage
         self._price(request.model, usage)

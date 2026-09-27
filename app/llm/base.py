@@ -19,9 +19,12 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.errors import ProviderError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from app.llm.models import ModelInfo
 
 
 class Role(StrEnum):
@@ -340,7 +343,7 @@ class LLMProvider(ABC):
     def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
         """One streaming turn, chunk by chunk."""
 
-    async def list_models(self) -> list["ModelInfo"]:  # noqa: F821 - resolved at runtime
+    async def list_models(self) -> list[ModelInfo]:  # noqa: F821 - resolved at runtime
         """Metadata for :meth:`models`, filled in by the registry.
 
         Kept here as a default so a provider that only knows its own catalog does

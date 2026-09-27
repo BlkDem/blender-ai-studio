@@ -19,7 +19,7 @@ from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 from app.core.errors import ConfigurationError, MCPError
-from app.core.events import Event, EventBus, EventType
+from app.core.events import EventBus, EventType
 from app.llm.base import ToolSpec
 from app.mcp.client import MCPSession
 from app.mcp.models import (
@@ -190,10 +190,7 @@ class MCPManager:
             return ToolOutcome(
                 call_id=f"call_unknown_{name}",
                 tool=name,
-                text=(
-                    f"No connected MCP server provides '{name}'. "
-                    f"Available tools: {known}."
-                ),
+                text=(f"No connected MCP server provides '{name}'. Available tools: {known}."),
                 is_error=True,
                 error_code="UNKNOWN_TOOL",
             )

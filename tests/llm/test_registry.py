@@ -39,11 +39,15 @@ def test_a_model_is_a_row_not_a_branch() -> None:
         [
             config(),
             ProviderConfig(
-                name="openai", kind="openai", default_model="gpt-4o-mini",
+                name="openai",
+                kind="openai",
+                default_model="gpt-4o-mini",
                 models=[{"id": "gpt-4o-mini", "supports_vision": True, "input_price": 0.15}],
             ),
             ProviderConfig(
-                name="anthropic", kind="anthropic", default_model="claude-sonnet-4-5",
+                name="anthropic",
+                kind="anthropic",
+                default_model="claude-sonnet-4-5",
                 models=[{"id": "claude-sonnet-4-5", "supports_thinking": True}],
             ),
         ]
@@ -105,7 +109,11 @@ def test_the_store_wins_over_the_environment(monkeypatch: pytest.MonkeyPatch, se
     secrets = SecretStore(secrets_file)
     secrets.set("openai.api_key", "from-store")
     registry = LLMRegistry(
-        [ProviderConfig(name="openai", kind="openai", default_model="gpt-4o-mini", models=[{"id": "gpt-4o-mini"}])],
+        [
+            ProviderConfig(
+                name="openai", kind="openai", default_model="gpt-4o-mini", models=[{"id": "gpt-4o-mini"}]
+            )
+        ],
         secrets,
     )
     assert registry.provider("openai").api_key == "from-store"
@@ -121,8 +129,26 @@ def test_the_environment_is_the_fallback(monkeypatch: pytest.MonkeyPatch, secret
 
 
 def test_the_mock_provider_needs_no_key() -> None:
-    registry = LLMRegistry([ProviderConfig(name="mock", kind="mock", default_model="m", models=[{"id": "m"}])])
+    registry = LLMRegistry(
+        [ProviderConfig(name="mock", kind="mock", default_model="m", models=[{"id": "m"}])]
+    )
     assert registry.is_configured("mock") is True
+
+
+def test_a_local_endpoint_needs_no_key(secrets_file) -> None:
+    """vLLM, Ollama and llama.cpp do not ask for one, and a studio that reports
+    "no API key" about the user's own localhost is confusing."""
+    registry = LLMRegistry(
+        [config(name="local", base_url="http://127.0.0.1:11400/v1")], SecretStore(secrets_file)
+    )
+    assert registry.is_configured("local") is True
+
+
+def test_a_remote_endpoint_still_needs_a_key(secrets_file) -> None:
+    registry = LLMRegistry(
+        [config(name="gateway", base_url="https://api.example/v1")], SecretStore(secrets_file)
+    )
+    assert registry.is_configured("gateway") is False
 
 
 def test_a_disabled_provider_is_off_but_still_listed() -> None:
@@ -161,7 +187,9 @@ def test_a_custom_endpoint_needs_no_code() -> None:
 
 
 def test_closing_releases_every_provider() -> None:
-    registry = LLMRegistry([config(), ProviderConfig(name="mock", kind="mock", models=[{"id": "m"}], default_model="m")])
+    registry = LLMRegistry(
+        [config(), ProviderConfig(name="mock", kind="mock", models=[{"id": "m"}], default_model="m")]
+    )
     registry.provider("local")
     registry.provider("mock")
     import asyncio
@@ -212,7 +240,5 @@ async def test_the_mock_provider_records_what_it_was_asked() -> None:
     from app.llm.base import ChatRequest, Message, ToolSpec
 
     provider = MockLLMProvider([ScriptedTurn(text="ok")])
-    await provider.chat(
-        ChatRequest(messages=[Message.user("hi")], model="mock-model", tools=[ToolSpec("t")])
-    )
+    await provider.chat(ChatRequest(messages=[Message.user("hi")], model="mock-model", tools=[ToolSpec("t")]))
     assert provider.requests[0].tools[0].name == "t"

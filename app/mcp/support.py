@@ -10,8 +10,8 @@ from __future__ import annotations
 import json
 import sys
 
-from mcp.server.mcpserver import Context, MCPServer
-from mcp_types import TextContent
+from mcp.server.mcpserver import MCPServer
+from mcp_types import ContentBlock, ImageContent, TextContent
 
 INSTRUCTIONS = "This is the test server for Blender AI Studio. Use echo to check a round trip."
 
@@ -55,18 +55,17 @@ def build() -> MCPServer:
         return "waited"
 
     @app.tool()
-    def picture() -> list[TextContent]:
+    def picture() -> list[ContentBlock]:
         """Answer with an image block, like a render preview does."""
         # 1x1 transparent PNG.
         import base64
 
         png = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
-            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
         )
         return [
             TextContent(type="text", text=json.dumps({"rendered": True})),
-            TextContent(type="image", data=base64.b64encode(png).decode(), mimeType="image/png"),
+            ImageContent(type="image", data=base64.b64encode(png).decode(), mime_type="image/png"),
         ]
 
     @app.resource("test://greeting", name="Greeting", mime_type="text/plain")

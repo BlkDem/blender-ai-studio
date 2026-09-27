@@ -21,7 +21,7 @@ import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 logger = logging.getLogger(__name__)
 
@@ -137,10 +137,11 @@ class CoreThread:
         """
         if self.loop is None:  # pragma: no cover - start() always runs first
             raise RuntimeError("the core thread is not running")
+        loop = self.loop
 
         def run() -> None:
             try:
-                result = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+                result = asyncio.run_coroutine_threadsafe(coroutine, loop)
             except RuntimeError as exc:  # loop already closed
                 self._inbox.put(("error", ("CORE_CLOSED", str(exc))))
                 return

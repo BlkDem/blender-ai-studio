@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -173,9 +174,7 @@ class ProjectRepository:
             values.append(json_dumps(fields["metadata"]))
         assignments.append("updated_at = ?")
         values.extend([time.time(), project_id])
-        await self._db.run(
-            f"UPDATE projects SET {', '.join(assignments)} WHERE id = ?", values
-        )
+        await self._db.run(f"UPDATE projects SET {', '.join(assignments)} WHERE id = ?", values)
 
     async def delete(self, project_id: str) -> None:
         await self._db.run("DELETE FROM projects WHERE id = ?", (project_id,))
@@ -289,7 +288,7 @@ class MessageRepository:
         )
         return message
 
-    async def list(self, conversation_id: str) -> list[Message]:
+    async def list(self, conversation_id: str) -> Sequence[Message]:
         rows = await self._db.all(
             "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid",
             (conversation_id,),
@@ -307,7 +306,7 @@ class MessageRepository:
             for row in rows
         ]
 
-    async def tool_calls_for_run(self, run_id: str) -> list[ToolCallRecord]:
+    async def tool_calls_for_run(self, run_id: str) -> Sequence[ToolCallRecord]:
         rows = await self._db.all(
             "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY started_at, rowid", (run_id,)
         )

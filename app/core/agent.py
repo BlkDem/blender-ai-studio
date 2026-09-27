@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.cost import Budget, CostTotals, CostTracker
-from app.core.errors import AgentError, BudgetExceeded, Cancelled, MCPError, StudioError
+from app.core.errors import AgentError, BudgetExceeded, MCPError, StudioError
 from app.core.events import Event, EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
@@ -33,7 +33,6 @@ from app.llm.base import (
     LLMProvider,
     Message,
     Role,
-    StreamChunk,
     ToolCall,
     ToolResult,
     ToolSpec,
@@ -148,6 +147,12 @@ class Agent:
         self.studio = studio
         self.conversation_id = conversation_id
         self._runs: dict[str, asyncio.Task[Any]] = {}
+        #: Whether a transaction this agent opened is still open. Tracked here
+        #: rather than asked of the add-on, because the agent began every
+        #: transaction it cares about — and because a run that stops between
+        #: begin and commit leaves the add-on refusing the *next* run's begin,
+        #: which is a confusing failure with no obvious cause.
+        self._open_transaction = False
 
     # --- tools -------------------------------------------------------------
 
@@ -170,11 +175,11 @@ class Agent:
         server_notes = self.mcp.tool_instructions()
         if server_notes:
             parts.append(server_notes)
-        catalog = self.tools()
-        if catalog:
-            lines = [f"- {spec.name}: {spec.description.splitlines()[0] if spec.description else ''}".rstrip(": ")
-                     for spec in catalog]
-            parts.append("Tools available now:\n" + "\n".join(lines))
+        # The tool catalog is deliberately *not* repeated here. It already travels
+        # in the request's ``tools`` field with every description and schema, and
+        # writing it out again in the prompt costs a few hundred tokens on every
+        # single request of a run — which is the most expensive kind of duplication
+        # there is, because it is paid once per step.
         return "\n\n".join(parts)
 
     # --- running -----------------------------------------------------------
@@ -203,22 +208,31 @@ class Agent:
             self._runs[run_id] = current
         self.budget.reset()
         started = time.perf_counter()
-        self._publish(run_id, EventType.RUN_STARTED, model=self.model, provider=self.provider.name,
-                      tools=[spec.name for spec in self.tools()])
+        self._publish(
+            run_id,
+            EventType.RUN_STARTED,
+            model=self.model,
+            provider=self.provider.name,
+            tools=[spec.name for spec in self.tools()],
+        )
 
-        messages: list[Message] = [Message.system(self.build_system_prompt()), *history, Message.user(user_text)]
+        messages: list[Message] = [
+            Message.system(self.build_system_prompt()),
+            *history,
+            Message.user(user_text),
+        ]
         result.messages = list(messages)
         if self.studio is not None:
             self.conversation_id = await self._conversation()
-            await self._store(conversation_id=self.conversation_id, role="user", content=user_text, run_id=run_id)
+            await self._store(
+                conversation_id=self.conversation_id, role="user", content=user_text, run_id=run_id
+            )
 
         try:
             while True:
                 self.budget.check(result.totals)
                 response = await self._one_turn(run_id, messages, result)
-                messages.append(
-                    Message.assistant(response.text, response.tool_calls)
-                )
+                messages.append(Message.assistant(response.text, response.tool_calls))
                 if self.studio is not None and (response.text or response.tool_calls):
                     await self._store(
                         conversation_id=self.conversation_id,
@@ -245,26 +259,54 @@ class Agent:
                     messages.append(tool_result.message())
                     result.messages = messages
         except asyncio.CancelledError:
-            self._publish(run_id, EventType.RUN_FAILED, reason="cancelled",
-                          steps=result.steps, **result.totals.to_dict())
+            self._publish(
+                run_id,
+                EventType.RUN_FAILED,
+                reason="cancelled",
+                steps=result.steps,
+                **result.totals.to_dict(),
+            )
             raise
         except BudgetExceeded as exc:
             result.stopped_because = exc.message
-            self._publish(run_id, EventType.RUN_FAILED, reason=exc.code, detail=exc.message,
-                          **result.totals.to_dict())
+            warning = self.transaction_warning()
+            self._publish(
+                run_id,
+                EventType.RUN_FAILED,
+                reason=exc.code,
+                detail=exc.message,
+                transaction_open=self._open_transaction,
+                hint=warning,
+                **result.totals.to_dict(),
+            )
             return result
         except (AgentError, MCPError) as exc:
             result.stopped_because = exc.user_text()
-            self._publish(run_id, EventType.RUN_FAILED, reason=exc.code, detail=exc.message,
-                          **result.totals.to_dict())
+            self._publish(
+                run_id,
+                EventType.RUN_FAILED,
+                reason=exc.code,
+                detail=exc.message,
+                transaction_open=self._open_transaction,
+                hint=self.transaction_warning(),
+                **result.totals.to_dict(),
+            )
             raise
         finally:
             self._runs.pop(run_id, None)
             result.elapsed_s = time.perf_counter() - started
             result.totals = self.cost.totals
 
-        self._publish(run_id, EventType.RUN_FINISHED, text=result.text, steps=result.steps,
-                      elapsed_s=round(result.elapsed_s, 2), **result.totals.to_dict())
+        self._publish(
+            run_id,
+            EventType.RUN_FINISHED,
+            text=result.text,
+            steps=result.steps,
+            elapsed_s=round(result.elapsed_s, 2),
+            transaction_open=self._open_transaction,
+            hint=self.transaction_warning(),
+            **result.totals.to_dict(),
+        )
         return result
 
     async def _one_turn(self, run_id: str, messages: list[Message], result: RunResult) -> ChatResponse:
@@ -305,8 +347,9 @@ class Agent:
                 arguments[chunk.call_id] = ""
             elif chunk.type == "tool_delta":
                 arguments[chunk.call_id] = arguments.get(chunk.call_id, "") + chunk.partial
-                self._publish(run_id, EventType.TOOL_STARTED, tool=chunk.name, call_id=chunk.call_id,
-                              streaming=True)
+                self._publish(
+                    run_id, EventType.TOOL_STARTED, tool=chunk.name, call_id=chunk.call_id, streaming=True
+                )
             elif chunk.type == "tool_end":
                 call = calls.get(chunk.call_id)
                 if call is not None:
@@ -355,8 +398,10 @@ class Agent:
 
     async def _run_tool(self, run_id: str, call: ToolCall, result: RunResult) -> ToolResult:
         """Run one tool call and describe the outcome to the model."""
-        self._publish(run_id, EventType.TOOL_STARTED, tool=call.name, call_id=call.id,
-                      arguments=call.arguments)
+        started = time.perf_counter()
+        self._publish(
+            run_id, EventType.TOOL_STARTED, tool=call.name, call_id=call.id, arguments=call.arguments
+        )
         local = self._local_tool(call.name)
         error_code = ""
         try:
@@ -375,7 +420,7 @@ class Agent:
         except (StudioError, OSError, ValueError) as exc:
             outcome_text = f"Error: {exc}"
             images, credits, usd, is_error = [], 0.0, 0.0, True
-            error_code = exc.code
+            error_code = getattr(exc, "code", "ERROR")
 
         body = self._for_model(outcome_text)
 
@@ -384,12 +429,16 @@ class Agent:
             await self.studio.tool_calls.finish(
                 record.id, result=body, error_code=error_code, is_error=is_error
             )
+        self._note_transaction(call.name, is_error)
         self.cost.add_tool_call(is_error)
         self.cost.add_3d(credits, usd)
         result.totals = self.cost.totals
         result.images.extend(images)
 
         body = self._for_model(outcome_text)
+        # The duration belongs in the event: it is the one number a person
+        # watching the transcript cannot work out for themselves, and the card in
+        # the chat is where they look for it.
         self._publish(
             run_id,
             EventType.TOOL_FAILED if is_error else EventType.TOOL_FINISHED,
@@ -398,9 +447,34 @@ class Agent:
             is_error=is_error,
             text=body,
             images=len(images),
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
         self._publish(run_id, EventType.COST, **self.cost.totals.to_dict())
         return ToolResult(call=call, content=body, is_error=is_error)
+
+    def _note_transaction(self, tool: str, is_error: bool) -> None:
+        """Track begin/commit/rollback, so a stop can be explained.
+
+        Matched on the last segment, because an MCP tool arrives as
+        ``blender.begin_transaction`` while a local one is bare — and the
+        difference is exactly what makes this silently never fire.
+        """
+        if is_error:
+            return
+        match tool.rsplit(".", 1)[-1]:
+            case "begin_transaction":
+                self._open_transaction = True
+            case "commit_transaction" | "rollback_transaction":
+                self._open_transaction = False
+
+    def transaction_warning(self) -> str:
+        """What to tell a user whose next run cannot start a transaction."""
+        if not self._open_transaction:
+            return ""
+        return (
+            "A transaction from this run is still open in Blender. A new one cannot start "
+            "until it is closed: commit it to keep the work, or roll it back to undo it."
+        )
 
     async def _run_local(
         self, tool: LocalTool, call: ToolCall, result: RunResult
@@ -426,10 +500,8 @@ class Agent:
             return text
         half = self.max_result_chars // 2
         return (
-            text[:half]
-            + f"\n… {len(text) - self.max_result_chars} characters omitted; "
-            "ask for a narrower result if you need the detail …\n"
-            + text[-half:]
+            text[:half] + f"\n… {len(text) - self.max_result_chars} characters omitted; "
+            "ask for a narrower result if you need the detail …\n" + text[-half:]
         )
 
     # --- persistence -------------------------------------------------------

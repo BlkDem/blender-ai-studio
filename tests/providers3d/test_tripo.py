@@ -15,7 +15,6 @@ import httpx
 import pytest
 
 from app.core.errors import ConfigurationError, NotImplementedCapability, ThreeDError
-from app.providers3d.base import ThreeDProvider
 from app.providers3d.mock import MockThreeDProvider
 from app.providers3d.models import AssetRequest, ProviderTask, TaskStatus
 from app.providers3d.registry import ThreeDRegistry
@@ -114,7 +113,9 @@ def _task_response(status: str, **extra) -> httpx.Response:
 
 async def test_a_running_task_reports_progress_as_a_fraction() -> None:
     provider = tripo_with(lambda request: _task_response("running", progress=42))
-    task = await provider.status(ProviderTask.new("tripo", AssetRequest(prompt="x"), provider_task_id="task_abc"))
+    task = await provider.status(
+        ProviderTask.new("tripo", AssetRequest(prompt="x"), provider_task_id="task_abc")
+    )
     assert task.status is TaskStatus.RUNNING
     assert task.progress == pytest.approx(0.42)
 

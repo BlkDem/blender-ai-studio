@@ -23,7 +23,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from app.core.context import AppContext, setup_logging
 from app.core.errors import ConfigurationError, StudioError
@@ -68,7 +67,9 @@ async def check(context: AppContext, *, as_json: bool) -> int:
     problems: list[str] = []
 
     lines.append(f"data directory   {settings.resolved_database_path} (database)")
-    lines.append(f"secrets          {settings.resolved_secrets_path} (backend: {context.secrets.backend if context.secrets else '?'})")
+    lines.append(
+        f"secrets          {settings.resolved_secrets_path} (backend: {context.secrets.backend if context.secrets else '?'})"
+    )
 
     # --- MCP ---------------------------------------------------------------
     lines.append("")
@@ -130,16 +131,16 @@ async def check(context: AppContext, *, as_json: bool) -> int:
     if not context.llm.configs():
         problems.append("no LLM provider is configured")
         lines.append("  (none configured)")
-    for config in context.llm.configs():
-        ready = context.llm.is_configured(config.name)
-        models = [m.id for m in context.llm.models(config.name)]
+    for provider in context.llm.configs():
+        ready = context.llm.is_configured(provider.name)
+        models = [model.id for model in context.llm.models(provider.name)]
         mark = "ok" if ready else "no API key"
-        lines.append(f"  {config.name} [{config.kind}]: {mark}")
-        lines.append(f"    base url     {config.base_url or '(default)'}")
-        lines.append(f"    default      {config.default_model or '(first in catalog)'}")
+        lines.append(f"  {provider.name} [{provider.kind}]: {mark}")
+        lines.append(f"    base url     {provider.base_url or '(default)'}")
+        lines.append(f"    default      {provider.default_model or '(first in catalog)'}")
         lines.append(f"    models       {', '.join(models) if models else '(none configured)'}")
-        if not ready and config.kind != "mock":
-            problems.append(f"{config.name}: no API key")
+        if not ready and provider.kind != "mock":
+            problems.append(f"{provider.name}: no API key")
 
     # --- 3D ----------------------------------------------------------------
     lines.append("")
@@ -159,11 +160,15 @@ async def check(context: AppContext, *, as_json: bool) -> int:
     lines.append("")
     lines.append("Agent limits")
     agent = settings.agent
-    lines.append(f"  steps {agent.max_steps} · tool calls {agent.max_tool_calls} · seconds {agent.max_seconds:g}")
+    lines.append(
+        f"  steps {agent.max_steps} · tool calls {agent.max_tool_calls} · seconds {agent.max_seconds:g}"
+    )
     lines.append(
         f"  LLM budget ${agent.max_request_cost:g} per request, ${agent.max_session_cost:g} per session"
     )
-    lines.append(f"  3D credits {agent.max_3d_credits} · execute_python {'allowed' if agent.allow_execute_python else 'blocked'}")
+    lines.append(
+        f"  3D credits {agent.max_3d_credits} · execute_python {'allowed' if agent.allow_execute_python else 'blocked'}"
+    )
 
     payload = {
         "ok": not problems,
@@ -201,9 +206,17 @@ async def list_tools(context: AppContext, *, as_json: bool) -> int:
     await context.mcp.connect_all()
     catalog = context.mcp.tools()
     if as_json:
-        print(json.dumps({name: tool.to_dict() if hasattr(tool, "to_dict") else {
-            "name": tool.name, "description": tool.description, "schema": tool.schema
-        } for name, tool in catalog.items()}, indent=2))
+        print(
+            json.dumps(
+                {
+                    name: tool.to_dict()
+                    if hasattr(tool, "to_dict")
+                    else {"name": tool.name, "description": tool.description, "schema": tool.schema}
+                    for name, tool in catalog.items()
+                },
+                indent=2,
+            )
+        )
         return EXIT_OK
     for name, tool in catalog.items():
         required = ", ".join(tool.required_arguments()) or "-"
@@ -212,16 +225,18 @@ async def list_tools(context: AppContext, *, as_json: bool) -> int:
     return EXIT_OK
 
 
-async def run_prompt(
-    context: AppContext, text: str, provider: str, model: str, *, as_json: bool
-) -> int:
+async def run_prompt(context: AppContext, text: str, provider: str, model: str, *, as_json: bool) -> int:
     """One turn, headless. The whole stack, no window."""
     if not provider:
-        configured = context.llm.configs() if context.llm else []
-        if not configured:
+        registry = context.llm
+        configured = registry.configs() if registry else []
+        if not configured or registry is None:
             print("No LLM provider is configured.", file=sys.stderr)
             return EXIT_NOT_CONFIGURED
-        provider = next((c.name for c in configured if c.kind != "mock" and context.llm.is_configured(c.name)), configured[0].name)
+        provider = next(
+            (c.name for c in configured if c.kind != "mock" and registry.is_configured(c.name)),
+            configured[0].name,
+        )
 
     assert context.mcp is not None
     await context.mcp.connect_all()
@@ -288,7 +303,9 @@ async def amain(options: argparse.Namespace) -> int:
         if options.list_tools:
             return await list_tools(context, as_json=options.json)
         if options.prompt:
-            return await run_prompt(context, options.prompt, options.provider, options.model, as_json=options.json)
+            return await run_prompt(
+                context, options.prompt, options.provider, options.model, as_json=options.json
+            )
     except ConfigurationError as exc:
         print(f"Configuration problem: {exc.user_text()}", file=sys.stderr)
         return EXIT_NOT_CONFIGURED

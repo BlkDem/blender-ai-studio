@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -42,8 +41,14 @@ class SettingsPanel(QWidget):
         self.theme = QLineEdit("system")
         self.language = QLineEdit("en")
         self.log_level = QLineEdit("INFO")
-        for label, widget in (("Theme", self.theme), ("Language", self.language), ("Log level", self.log_level)):
-            widget.editingFinished.connect(lambda w=widget, l=label.lower().replace(" ", "_"): self.setting_changed.emit(l, w.text()))
+        for label, widget in (
+            ("Theme", self.theme),
+            ("Language", self.language),
+            ("Log level", self.log_level),
+        ):
+            widget.editingFinished.connect(
+                lambda w=widget, key=label.lower().replace(" ", "_"): self.setting_changed.emit(key, w.text())
+            )
             general_form.addRow(label, widget)
         layout.addWidget(general)
 
@@ -107,7 +112,11 @@ class SettingsPanel(QWidget):
         ):
             agent_form.addRow(label, widget)
             connect = widget.editingFinished if isinstance(widget, QLineEdit) else widget.valueChanged
-            connect.connect(lambda _=None, w=widget, k=key: self.setting_changed.emit(k, w.value() if not isinstance(w, QLineEdit) else w.text()))
+            connect.connect(
+                lambda _=None, w=widget, k=key: self.setting_changed.emit(
+                    k, w.value() if not isinstance(w, QLineEdit) else w.text()
+                )
+            )
         self.allow_execute_python.toggled.connect(
             lambda checked: self.setting_changed.emit("agent.allow_execute_python", checked)
         )

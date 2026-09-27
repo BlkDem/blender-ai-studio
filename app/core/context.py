@@ -12,6 +12,7 @@ diagnostic that lies.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,7 +27,6 @@ from app.llm.models import ModelInfo
 from app.llm.registry import LLMRegistry, registry_from_settings
 from app.mcp.manager import MCPManager
 from app.mcp.models import ServerInfo
-from app.providers3d.base import ThreeDProvider
 from app.providers3d.registry import ThreeDRegistry
 from app.storage.repositories import Studio
 from app.storage.secrets import SecretStore
@@ -52,7 +52,7 @@ def setup_logging(level: str = "INFO") -> None:
     root.setLevel(level.upper())
 
 
-def mcp_server_info(config: MCPServerConfig) -> ServerInfo:
+def mcp_server_info(config: MCPServerConfig | dict) -> ServerInfo:
     """The settings form of a server, as the client wants it.
 
     The bridge address lives in the *child's* environment, not in the client's
@@ -61,6 +61,18 @@ def mcp_server_info(config: MCPServerConfig) -> ServerInfo:
     that no Blender is attached — to a bridge the server never told the add-on
     about.
     """
+    if not isinstance(config, MCPServerConfig):
+        # A hand-edited STUDIO_MCP_SERVERS, or a value from an older release. The
+        # AttributeError that would otherwise surface -- "'str' object has no
+        # attribute 'env'" -- says nothing about which setting is wrong.
+        try:
+            config = MCPServerConfig.model_validate(config)
+        except Exception as exc:
+            raise ConfigurationError(
+                f"The MCP server configuration is not valid: {exc}",
+                hint="Check STUDIO_MCP_SERVERS: it must be a JSON list of objects "
+                "with at least a name and a command.",
+            ) from exc
     env = dict(config.env)
     if config.kind == "stdio" and config.command:
         for key, value in config.child_env().items():
@@ -125,13 +137,19 @@ class AppContext:
         return self
 
     async def close(self) -> None:
-        for closer in (self.mcp, self.llm, self.three_d):
-            if closer is None:
+        # Each registry is a different type with the same method; they share no
+        # base class, and inventing one for a shutdown path would be worse.
+        for name, close in (
+            ("mcp", self.mcp.disconnect_all() if self.mcp else None),
+            ("llm", self.llm.close_all() if self.llm else None),
+            ("3d", self.three_d.close_all() if self.three_d else None),
+        ):
+            if close is None:
                 continue
             try:
-                await closer.close_all()  # type: ignore[attr-defined]
+                await close
             except Exception:  # pragma: no cover - shutdown is best effort
-                logger.debug("closing %s failed", type(closer).__name__, exc_info=True)
+                logger.debug("closing %s failed", name, exc_info=True)
         if self.tasks is not None:
             await self.tasks.cancel_all()
         if self.studio is not None:
@@ -145,7 +163,7 @@ class AppContext:
         model: str = "",
         *,
         stream: bool = True,
-        extra_tools: list[LocalTool] = (),
+        extra_tools: Sequence[LocalTool] = (),
         budget: Budget | None = None,
     ) -> Agent:
         """An agent wired to this studio's MCP servers, tools and budget.

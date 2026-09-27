@@ -14,6 +14,7 @@ rows, so they are switched on here rather than in every schema.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sqlite3
 import threading
@@ -82,10 +83,8 @@ class Database:
         with self._connections_lock:
             connections, self._connections = self._connections, []
         for connection in connections:
-            try:
+            with contextlib.suppress(sqlite3.Error):  # pragma: no cover - already closed
                 connection.close()
-            except sqlite3.Error:  # pragma: no cover - already closed
-                pass
         self._local = threading.local()
         self._closed = True
 

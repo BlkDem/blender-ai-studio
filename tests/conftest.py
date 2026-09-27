@@ -41,7 +41,7 @@ def secrets_file(data_dir: Path) -> Path:
 
 
 @pytest.fixture
-async def studio(database_path: Path) -> AsyncIterator["object"]:
+async def studio(database_path: Path) -> AsyncIterator[object]:
     """A migrated, empty studio database, closed at the end of the test."""
     from app.storage.repositories import Studio
 
@@ -53,7 +53,7 @@ async def studio(database_path: Path) -> AsyncIterator["object"]:
 
 
 @pytest.fixture
-def raw_database(database_path: Path) -> Iterator["object"]:
+def raw_database(database_path: Path) -> Iterator[object]:
     """The bare connection, for tests about migrations and pragmas."""
     from app.storage.database import Database
 

@@ -72,7 +72,7 @@ class ModelInfo:
         file may carry a field a future version understands, and losing it would
         mean a round trip through the database changes the model.
         """
-        known = {name for name in cls.__dataclass_fields__}
+        known = set(cls.__dataclass_fields__)
         extra: dict[str, Any] = dict(raw.get("extra") or {})
         for key, value in raw.items():
             if key not in known and key != "extra":
@@ -98,7 +98,4 @@ def cost_of(
     full price on every turn.
     """
     billable_input = max(0, input_tokens - cached_tokens)
-    return (
-        billable_input / 1_000_000 * model.input_price
-        + output_tokens / 1_000_000 * model.output_price
-    )
+    return billable_input / 1_000_000 * model.input_price + output_tokens / 1_000_000 * model.output_price

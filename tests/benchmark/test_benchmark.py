@@ -87,7 +87,9 @@ def registry_with(models: dict[str, str]) -> LLMRegistry:
     configs = []
     for name in models:
         configs.append(
-            ProviderConfig(name=name, kind="mock", default_model=f"{name}-model", models=[{"id": f"{name}-model"}])
+            ProviderConfig(
+                name=name, kind="mock", default_model=f"{name}-model", models=[{"id": f"{name}-model"}]
+            )
         )
     return LLMRegistry(configs)
 
@@ -104,9 +106,7 @@ def runner(mcp: CountingMCP, models: dict[str, str], **kwargs) -> BenchmarkRunne
 # --- isolation --------------------------------------------------------------
 
 
-async def test_each_run_gets_its_own_copy_of_the_starting_file(
-    mcp: CountingMCP, tmp_path: Path
-) -> None:
+async def test_each_run_gets_its_own_copy_of_the_starting_file(mcp: CountingMCP, tmp_path: Path) -> None:
     blend = tmp_path / "start.blend"
     blend.write_bytes(b"blend")
     bench = runner(mcp, {"a": ""}, workdir=tmp_path / "work")
@@ -297,7 +297,9 @@ async def test_a_person_scores_a_run_and_the_score_is_joined_into_the_table(stud
     comparison = await bench.run_suite([BenchmarkTask("x")], [ModelSpec("a")])
     run_id = (await storage.save_comparison(suite_id, comparison))[0]
 
-    await storage.review(run_id, geometry=4, materials=2, instruction_following=5, overall=4, notes="legs are square")
+    await storage.review(
+        run_id, geometry=4, materials=2, instruction_following=5, overall=4, notes="legs are square"
+    )
 
     table = await storage.table(suite_id)
     assert table[0]["geometry"] == 4
@@ -322,7 +324,12 @@ async def test_transcripts_survive_for_later_reading(studio) -> None:
 
 def test_a_suite_can_be_saved_and_reloaded(tmp_path: Path) -> None:
     path = tmp_path / "suite.json"
-    save_suite(path, [BenchmarkTask("make a table", name="table")], [ModelSpec("space-bunny", "space-bunny-free")], "Tables")
+    save_suite(
+        path,
+        [BenchmarkTask("make a table", name="table")],
+        [ModelSpec("space-bunny", "space-bunny-free")],
+        "Tables",
+    )
     name, tasks, models = load_suite(path)
     assert name == "Tables"
     assert tasks[0].name == "table"

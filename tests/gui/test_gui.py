@@ -28,8 +28,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from app.core.context import AppContext  # noqa: E402
 from app.core.events import Event, EventBus, EventType  # noqa: E402
 from app.core.settings import Settings  # noqa: E402
-from app.gui.bridge import CoreThread, elide, format_duration, format_money  # noqa: E402
 from app.gui.benchmark.panel import BenchmarkPanel  # noqa: E402
+from app.gui.bridge import CoreThread, elide, format_duration, format_money  # noqa: E402
 from app.gui.chat.widget import ChatView  # noqa: E402
 from app.gui.main_window import MainWindow  # noqa: E402
 from app.gui.models.panel import ModelsPanel  # noqa: E402
@@ -92,7 +92,53 @@ def test_the_transcript_shows_messages_streaming_and_tool_calls(qapp) -> None:
     assert "Create a table with four legs." in text
     assert "I will build it now." in text, "the streamed text reassembles exactly"
     assert "✓ blender.create_object · 42 ms" in text
-    assert view.summary() == {"messages": 2, "tools": 1, "text_chars": len("Create a table with four legs.") + len("I will build it now.")}
+    assert view.summary() == {
+        "messages": 2,
+        "tools": 1,
+        "text_chars": len("Create a table with four legs.") + len("I will build it now."),
+    }
+
+
+def test_a_bubble_hugs_its_text(qapp) -> None:
+    """A one-line answer must not occupy a screen.
+
+    Measured after a layout pass: an unshown widget reports a default height,
+    which says nothing about how it will look.
+    """
+    view = ChatView()
+    view.resize(900, 600)
+    view.show()
+    qapp.processEvents()
+
+    bubble = view.add_message("assistant", "Done.")
+    qapp.processEvents()
+    assert bubble.height() < 80, f"a one-line bubble took {bubble.height()}px"
+
+    bubble.append(" A considerably longer second sentence that wraps on a narrow width.")
+    qapp.processEvents()
+    assert bubble.height() < 240, "and the cap still holds"
+
+    layout_items = [view._transcript_layout.itemAt(i) for i in range(view._transcript_layout.count())]  # noqa: SLF001
+    assert layout_items[0].geometry().height() == bubble.height(), "the spacer takes the rest"
+
+
+def test_a_sub_second_duration_keeps_its_precision(qapp) -> None:
+    """Two calls at 213 and 217 ms must not both read "213 ms"."""
+    view = ChatView()
+    view.add_tool("a", "t1")
+    view.finish_tool("a", is_error=False, text="{}", duration_ms=213.4)
+    view.add_tool("b", "t2")
+    view.finish_tool("b", is_error=False, text="{}", duration_ms=217.9)
+    text = view.transcript_text()
+    assert "t1 · 213 ms" in text
+    assert "t2 · 218 ms" in text
+
+
+def test_a_slow_tool_call_is_shown_in_seconds(qapp) -> None:
+    view = ChatView()
+    view.add_tool("a", "blender.render")
+    view.finish_tool("a", is_error=False, text="{}", duration_ms=2450.0)
+    assert "blender.render · 2.45 s" in view.transcript_text()
 
 
 def test_a_failed_tool_call_is_marked_as_a_failure(qapp) -> None:
@@ -157,7 +203,15 @@ def test_the_scene_panel_reads_a_scene_payload(qapp) -> None:
 
 def test_a_truncated_scene_says_so(qapp) -> None:
     panel = ScenePanel()
-    panel.show_scene({"scene": "Scene", "objects": [], "objects_count": 900, "objects_shown": 200, "objects_truncated": True})
+    panel.show_scene(
+        {
+            "scene": "Scene",
+            "objects": [],
+            "objects_count": 900,
+            "objects_shown": 200,
+            "objects_truncated": True,
+        }
+    )
     assert "truncated=True" in panel.fields["objects"].text()
 
 
@@ -168,13 +222,28 @@ def test_the_tasks_panel_adds_updates_and_totals(qapp) -> None:
     panel = TasksPanel()
     panel.add_or_update(
         {
-            "id": "t1", "name": "Tripo generation", "provider": "tripo", "state": "running",
-            "progress": 0.4, "duration_s": 42.0, "credits": 100, "cost_usd": 0.0,
+            "id": "t1",
+            "name": "Tripo generation",
+            "provider": "tripo",
+            "state": "running",
+            "progress": 0.4,
+            "duration_s": 42.0,
+            "credits": 100,
+            "cost_usd": 0.0,
         }
     )
     assert panel.table.rowCount() == 1
-    panel.add_or_update({"id": "t1", "name": "Tripo generation", "state": "succeeded", "progress": 1.0,
-                         "duration_s": 90.0, "credits": 100, "cost_usd": 0.0})
+    panel.add_or_update(
+        {
+            "id": "t1",
+            "name": "Tripo generation",
+            "state": "succeeded",
+            "progress": 1.0,
+            "duration_s": 90.0,
+            "credits": 100,
+            "cost_usd": 0.0,
+        }
+    )
     assert panel.table.rowCount() == 1, "the same task updates its row"
     assert panel.table.item(0, 2).text() == "succeeded"
     assert panel.totals()["credits"] == 100.0
@@ -186,12 +255,29 @@ def test_the_tasks_panel_adds_updates_and_totals(qapp) -> None:
 def test_the_models_panel_lists_providers_and_models(qapp) -> None:
     panel = ModelsPanel(secrets_backend="keyring")
     panel.show_providers(
-        [{"name": "space-bunny", "kind": "openai-compatible", "base_url": "https://x/v1",
-          "key": "••••1234", "models": [1], "ready": True}]
+        [
+            {
+                "name": "space-bunny",
+                "kind": "openai-compatible",
+                "base_url": "https://x/v1",
+                "key": "••••1234",
+                "models": [1],
+                "ready": True,
+            }
+        ]
     )
     panel.show_models(
-        [{"id": "space-bunny-free", "provider": "space-bunny", "supports_tools": True,
-          "supports_vision": False, "context_window": 128000, "input_price": 0, "output_price": 0}]
+        [
+            {
+                "id": "space-bunny-free",
+                "provider": "space-bunny",
+                "supports_tools": True,
+                "supports_vision": False,
+                "context_window": 128000,
+                "input_price": 0,
+                "output_price": 0,
+            }
+        ]
     )
     assert panel.providers_table.item(0, 0).text() == "space-bunny"
     assert panel.providers_table.item(0, 5).text() == "yes"
@@ -229,10 +315,28 @@ def test_the_benchmark_table_says_when_runs_were_not_isolated(qapp) -> None:
     panel = BenchmarkPanel()
     panel.show_comparison(
         [
-            {"id": "r1", "model": "a-model @ scripted", "status": "ok", "duration_s": 12.0,
-             "tokens": 768, "llm_cost_usd": 0.003, "mcp_calls": 3, "tool_errors": 0, "scene_reset": "copy_only"},
-            {"id": "r2", "model": "b-model @ scripted", "status": "ok", "duration_s": 20.0,
-             "tokens": 900, "llm_cost_usd": 0.004, "mcp_calls": 4, "tool_errors": 0, "scene_reset": "verified"},
+            {
+                "id": "r1",
+                "model": "a-model @ scripted",
+                "status": "ok",
+                "duration_s": 12.0,
+                "tokens": 768,
+                "llm_cost_usd": 0.003,
+                "mcp_calls": 3,
+                "tool_errors": 0,
+                "scene_reset": "copy_only",
+            },
+            {
+                "id": "r2",
+                "model": "b-model @ scripted",
+                "status": "ok",
+                "duration_s": 20.0,
+                "tokens": 900,
+                "llm_cost_usd": 0.004,
+                "mcp_calls": 4,
+                "tool_errors": 0,
+                "scene_reset": "verified",
+            },
         ]
     )
     assert panel.table.rowCount() == 2
@@ -281,17 +385,32 @@ async def window(qapp, database_path: Path):
             from app.mcp.models import ToolOutcome
 
             if name == "blender.get_scene":
-                return ToolOutcome(call_id="c", tool=name, text=_json.dumps({
-                    "scene": "Scene", "objects": [], "objects_count": 0, "objects_shown": 0,
-                    "objects_truncated": False, "render_engine": "CYCLES", "frame": 1,
-                }))
+                return ToolOutcome(
+                    call_id="c",
+                    tool=name,
+                    text=_json.dumps(
+                        {
+                            "scene": "Scene",
+                            "objects": [],
+                            "objects_count": 0,
+                            "objects_shown": 0,
+                            "objects_truncated": False,
+                            "render_engine": "CYCLES",
+                            "frame": 1,
+                        }
+                    ),
+                )
             return ToolOutcome(call_id="c", tool=name, text=_json.dumps({"ok": True}))
 
     settings = Settings(data_dir=database_path.parent)
     settings.mcp_servers = [MCPServerConfig(name="Blender MCP")]
     settings.llm_providers = [
-        ProviderConfig(name="scripted", kind="mock", default_model="scripted-model",
-                       models=[{"id": "scripted-model", "supports_tools": True}])
+        ProviderConfig(
+            name="scripted",
+            kind="mock",
+            default_model="scripted-model",
+            models=[{"id": "scripted-model", "supports_tools": True}],
+        )
     ]
     context = await AppContext(settings=settings).open()
     context.mcp = FakeMCP(context.bus)
@@ -360,7 +479,8 @@ async def test_events_from_the_bus_reach_the_window(window, qapp) -> None:
     )  # noqa: SLF001
     window._on_event(
         Event(
-            type=EventType.TOOL_FINISHED, run_id="r",
+            type=EventType.TOOL_FINISHED,
+            run_id="r",
             payload={"call_id": "c1", "text": '{"objects_count": 0}', "images": 0},
         )
     )  # noqa: SLF001

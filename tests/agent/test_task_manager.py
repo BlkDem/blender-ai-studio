@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from app.core.errors import Cancelled
 from app.core.events import EventBus, EventType
 from app.core.task_manager import TaskManager, TaskState

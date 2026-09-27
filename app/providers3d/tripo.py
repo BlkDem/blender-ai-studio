@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 
 from app.core.errors import ProviderError, ThreeDError
-from app.providers3d.base import ThreeDProvider, failed_task, succeeded_task
+from app.providers3d.base import ThreeDProvider, failed_task
 from app.providers3d.models import AssetRequest, AssetResult, ProviderTask, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -119,8 +119,17 @@ class TripoProvider(ThreeDProvider):
         }
         if request.image_url:
             body["image_url"] = request.image_url
-        for key in ("smart_low_poly", "quad", "face_limit", "generate_parts", "export_uv",
-                    "texture", "pbr", "orientation", "style"):
+        for key in (
+            "smart_low_poly",
+            "quad",
+            "face_limit",
+            "generate_parts",
+            "export_uv",
+            "texture",
+            "pbr",
+            "orientation",
+            "style",
+        ):
             if key in request.options:
                 body[key] = request.options[key]
         return body

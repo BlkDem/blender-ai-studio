@@ -122,7 +122,11 @@ class CostTracker:
     def add_usage(self, usage: Usage) -> float:
         """Record one request. Returns what it cost."""
         model = self.price()
-        cost = cost_of(model, usage.input_tokens, usage.output_tokens, cached_tokens=usage.cached_tokens) if model else 0.0
+        cost = (
+            cost_of(model, usage.input_tokens, usage.output_tokens, cached_tokens=usage.cached_tokens)
+            if model
+            else 0.0
+        )
         if cost == 0.0 and usage.cost_usd:
             # A provider that knows its own pricing better than the catalog did.
             cost = usage.cost_usd

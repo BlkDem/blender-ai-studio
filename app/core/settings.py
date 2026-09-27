@@ -142,12 +142,6 @@ class Settings(BaseSettings):
     def resolved_secrets_path(self) -> Path:
         return self.data_dir / "secrets.json"
 
-    def database(self) -> "SettingsDatabase":
-        """Where the GUI's edits are persisted, and how they are read back."""
-        from app.storage.database import SettingsDatabase
-
-        return SettingsDatabase(self)
-
     def apply_overrides(self, overrides: dict[str, Any]) -> None:
         """Merge values loaded from the database over the environment.
 

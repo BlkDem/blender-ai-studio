@@ -12,12 +12,14 @@ events. It never waits. Every network operation goes to the core thread through
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
@@ -98,9 +100,7 @@ class MainWindow(QMainWindow):
         self.scene = ScenePanel()
         self.tasks = TasksPanel()
         self.benchmark = BenchmarkPanel()
-        self.models = ModelsPanel(
-            secrets_backend=context.secrets.backend if context.secrets else "file"
-        )
+        self.models = ModelsPanel(secrets_backend=context.secrets.backend if context.secrets else "file")
         self.settings = SettingsPanel()
         for widget in (self.chat, self.scene, self.tasks, self.benchmark, self.models, self.settings):
             self.pages.addWidget(widget)
@@ -133,6 +133,12 @@ class MainWindow(QMainWindow):
         self.chat.submitted.connect(self.send)
         self.chat.stop_requested.connect(self.stop_run)
         self.scene.refresh_requested.connect(self.refresh_scene)
+        self.scene.commit_transaction.connect(
+            lambda: self._close_transaction("blender.commit_transaction", "Transaction committed.")
+        )
+        self.scene.rollback_transaction.connect(
+            lambda: self._close_transaction("blender.rollback_transaction", "Transaction rolled back.")
+        )
         self.models.model_selected.connect(self._model_selected)
         self.models.save_provider.connect(self._save_provider)
         self.models.set_api_key.connect(self._set_api_key)
@@ -186,9 +192,13 @@ class MainWindow(QMainWindow):
         block = self.model_selector.blockSignals(True)
         self.model_selector.clear()
         for model in models:
-            self.model_selector.addItem(f"{model['id']}  ·  {model['provider']}", f"{model['provider']}:{model['id']}")
+            self.model_selector.addItem(
+                f"{model['id']}  ·  {model['provider']}", f"{model['provider']}:{model['id']}"
+            )
         self.model_selector.blockSignals(block)
-        configured = [m for m in models if m.get("provider") and self.context.llm.is_configured(m["provider"])]
+        configured = [
+            m for m in models if m.get("provider") and self.context.llm.is_configured(m["provider"])
+        ]
         if configured:
             self.llm_status.setText(f"LLM: {configured[0]['provider']} ready")
         else:
@@ -240,7 +250,9 @@ class MainWindow(QMainWindow):
         self.chat.set_busy(False)
 
     async def _cancel_agent(self) -> bool:
-        return self.context.agent_cancel(self.current_run_id) if hasattr(self.context, "agent_cancel") else False
+        return (
+            self.context.agent_cancel(self.current_run_id) if hasattr(self.context, "agent_cancel") else False
+        )
 
     def _cancelled(self, ok: bool) -> None:
         if ok:
@@ -288,7 +300,7 @@ class MainWindow(QMainWindow):
                 call_id,
                 is_error=kind is EventType.TOOL_FAILED,
                 text=payload.get("text", ""),
-                duration_ms=0.0,
+                duration_ms=float(payload.get("duration_ms", 0.0) or 0.0),
                 images=int(payload.get("images", 0) or 0),
             )
         elif kind is EventType.RUN_STARTED:
@@ -300,7 +312,12 @@ class MainWindow(QMainWindow):
                 f"{payload.get('input_tokens', 0)} in / {payload.get('output_tokens', 0)} out · "
                 f"{format_money(float(payload.get('cost_usd', 0.0)))}"
             )
-        elif kind in (EventType.TASK_STARTED, EventType.TASK_PROGRESS, EventType.TASK_FINISHED, EventType.TASK_FAILED):
+        elif kind in (
+            EventType.TASK_STARTED,
+            EventType.TASK_PROGRESS,
+            EventType.TASK_FINISHED,
+            EventType.TASK_FAILED,
+        ):
             self.tasks.add_or_update(payload)
         elif kind is EventType.STATUS:
             self.mcp_status.setText(f"MCP: {payload.get('server', '?')} {payload.get('state', '')}")
@@ -334,6 +351,27 @@ class MainWindow(QMainWindow):
             return
         connected = "connected" if self.context.mcp and self.context.mcp.any_connected() else "not connected"
         self.scene.show_scene(payload, connected)
+
+    def _close_transaction(self, tool: str, message: str) -> None:
+        """Commit or roll back a transaction the agent left open.
+
+        Explicit, and on a button, because both outcomes destroy something: a
+        commit keeps work the user may not want, and a rollback discards work they
+        may. The studio is not going to choose for them.
+        """
+        self.core.submit(self._call(tool), lambda text: self._transaction_closed(text or message))
+
+    async def _call(self, tool: str) -> str:
+        assert self.context.mcp is not None
+        outcome = await self.context.mcp.call_tool(tool, {})
+        return outcome.text if outcome.is_error else ""
+
+    def _transaction_closed(self, text: str) -> None:
+        if text.startswith("blender."):
+            self.chat.add_note(text, role="error")
+            return
+        self.chat.add_note(text, role="system")
+        self.refresh_scene()
 
     # --- models and settings ----------------------------------------------
 
@@ -382,10 +420,10 @@ class MainWindow(QMainWindow):
             self.context.secrets.delete(key_name(provider))
         if self.context.three_d is not None:
             self.context.three_d.use_secrets(self.context.secrets)
-            try:
+            # An unknown provider name raises, and the caller is told so by the
+            # check that follows; here it only means "nothing to rebuild".
+            with contextlib.suppress(Exception):
                 self.context.three_d.provider(provider)
-            except Exception:  # noqa: BLE001 - an unknown name is reported below
-                pass
         return provider
 
     def _key_stored(self, provider: str) -> None:
@@ -460,9 +498,7 @@ class MainWindow(QMainWindow):
             self._benchmark(tasks, specs, blend), lambda comparison: self._benchmark_done(comparison)
         )
 
-    async def _benchmark(
-        self, tasks: list[BenchmarkTask], models: list[ModelSpec], blend: str
-    ) -> Any:
+    async def _benchmark(self, tasks: list[BenchmarkTask], models: list[ModelSpec], blend: str) -> Any:
         assert self.context.mcp is not None
         await self.context.mcp.connect_all()
         runner = BenchmarkRunner(
@@ -471,8 +507,7 @@ class MainWindow(QMainWindow):
             bus=self.context.bus,
             system_prompt=self.context.settings.agent.system_prompt,
         )
-        path = blend or None
-        return await runner.run_suite(tasks, models, blend=path)
+        return await runner.run_suite(tasks, models, blend=Path(blend) if blend else None)
 
     def _benchmark_done(self, comparison: Any) -> None:
         self.benchmark.run_button.setEnabled(True)
@@ -481,8 +516,7 @@ class MainWindow(QMainWindow):
         if comparison.outcomes and comparison.fastest() is not None:
             # Reported as a fact about the run, not as a recommendation.
             self.benchmark.summary.setText(
-                self.benchmark.summary.text()
-                + f" Shortest run: {comparison.fastest().model.label()}."
+                self.benchmark.summary.text() + f" Shortest run: {comparison.fastest().model.label()}."
             )
 
     def _cancel_benchmark(self) -> None:
@@ -491,7 +525,9 @@ class MainWindow(QMainWindow):
     def _save_review(self, run_id: str, scores: dict[str, Any]) -> None:
         if not run_id or self._benchmarks is None:
             return
-        self.core.submit(self._store_review(run_id, scores), lambda _: self.benchmark.summary.setText("Score saved."))
+        self.core.submit(
+            self._store_review(run_id, scores), lambda _: self.benchmark.summary.setText("Score saved.")
+        )
 
     async def _store_review(self, run_id: str, scores: dict[str, Any]) -> None:
         assert self._benchmarks is not None

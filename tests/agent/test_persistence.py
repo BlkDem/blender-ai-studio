@@ -25,8 +25,13 @@ class StoreMCP(MCPManager):
     def tool_specs(self):  # type: ignore[override]
         from app.llm.base import ToolSpec
 
-        return [ToolSpec(name="blender.get_scene", description="Summarise the scene",
-                         parameters={"type": "object", "properties": {}})]
+        return [
+            ToolSpec(
+                name="blender.get_scene",
+                description="Summarise the scene",
+                parameters={"type": "object", "properties": {}},
+            )
+        ]
 
     def tools(self):  # type: ignore[override]
         return {"blender.get_scene": ToolDescriptor(name="blender.get_scene", description="Summarise")}
@@ -85,7 +90,10 @@ async def test_a_failed_tool_call_is_stored_as_a_failure(studio) -> None:
             return ToolOutcome(call_id="c", tool=name, text="it broke", is_error=True, error_code="BOOM")
 
     agent = await agent_over(
-        studio, Failing(), ScriptedTurn(tool_calls=[("blender.get_scene", {})]), ScriptedTurn(text="It broke.")
+        studio,
+        Failing(),
+        ScriptedTurn(tool_calls=[("blender.get_scene", {})]),
+        ScriptedTurn(text="It broke."),
     )
     result = await agent.run("try it")
     stored = await studio.messages.tool_calls_for_run(result.run_id)

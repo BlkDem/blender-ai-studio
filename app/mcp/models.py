@@ -7,7 +7,6 @@ and the GUI, the agent and the model selector all work from that.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any

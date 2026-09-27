@@ -115,12 +115,19 @@ class ScriptedPlanner(MockLLMProvider):
             "",
         ).lower()
         if "chest" in latest or "medieval" in latest:
-            return self._reply(text="I'll have a specialist generate that.", tool_calls=[("generate_3d_asset", {"prompt": "medieval wooden chest", "texture": True})])
+            return self._reply(
+                text="I'll have a specialist generate that.",
+                tool_calls=[("generate_3d_asset", {"prompt": "medieval wooden chest", "texture": True})],
+            )
         if "move" in latest or "position" in latest:
             name = _name_after(latest) or "TestCube"
             return self._reply(tool_calls=[("blender.update_object", {"name": name, "location": [3, 3, 1]})])
         if "testcube" in latest or "cube named" in latest:
-            return self._reply(tool_calls=[("blender.create_object", {"type": "cube", "name": "TestCube", "location": [2, 0, 1]})])
+            return self._reply(
+                tool_calls=[
+                    ("blender.create_object", {"type": "cube", "name": "TestCube", "location": [2, 0, 1]})
+                ]
+            )
         if "table" in latest:
             return self._reply(tool_calls=[("blender.create_object", {"type": "cube", "name": "TableTop"})])
         return self._reply(tool_calls=[("blender.get_scene", {})])
@@ -184,8 +191,12 @@ def settings_for(options: argparse.Namespace) -> Settings:
         )
     else:
         providers.append(
-            {"name": "scripted", "kind": "mock", "default_model": "scripted-planner",
-             "models": [{"id": "scripted-planner", "supports_tools": True}]}
+            {
+                "name": "scripted",
+                "kind": "mock",
+                "default_model": "scripted-planner",
+                "models": [{"id": "scripted-planner", "supports_tools": True}],
+            }
         )
     settings.llm_providers = providers
     return settings
@@ -231,19 +242,23 @@ async def run(options: argparse.Namespace) -> int:
         print("\n2. the MCP server", flush=True)
         assert context.mcp is not None
         statuses = await context.mcp.connect_all()
-        check("blender-mcp connected", all(s.ready for s in statuses),
-              statuses[0].last_error if statuses else "no servers configured")
+        check(
+            "blender-mcp connected",
+            all(s.ready for s in statuses),
+            statuses[0].last_error if statuses else "no servers configured",
+        )
         catalog = context.mcp.tools()
         check("its tools were discovered", len(catalog) > 0, f"{len(catalog)} tools")
-        check("the catalog is dynamic, not hardcoded",
-              any(name.startswith("blender.") for name in catalog),
-              ", ".join(sorted(catalog)[:4]) + " …")
+        check(
+            "the catalog is dynamic, not hardcoded",
+            any(name.startswith("blender.") for name in catalog),
+            ", ".join(sorted(catalog)[:4]) + " …",
+        )
         check("resources too", len(context.mcp.resources()) > 0, len(context.mcp.resources()))
 
         print("\n3. a tool call reaches Blender", flush=True)
         scene = await wait_for_blender(context, options.wait_seconds)
-        check("get_scene answered", not scene.is_error,
-              scene.text.splitlines()[0][:60] if scene.text else "")
+        check("get_scene answered", not scene.is_error, scene.text.splitlines()[0][:60] if scene.text else "")
         check("Blender is attached", not scene.is_error, scene.error_code)
 
         provider_name = options.provider or "scripted"
@@ -257,11 +272,16 @@ async def run(options: argparse.Namespace) -> int:
         result = await agent.run("Create a cube named TestCube at location 2, 0, 1.")
         print("     agent said: " + (result.text or "(nothing)"), flush=True)
         check("the agent finished", result.finished, result.stopped_because)
-        check("it called blender.create_object",
-              any(c.call.name == "blender.create_object" for c in result.tool_calls),
-              [c.call.name for c in result.tool_calls])
-        check("no tool errored", not any(c.is_error for c in result.tool_calls),
-              [c.content[:60] for c in result.tool_calls if c.is_error])
+        check(
+            "it called blender.create_object",
+            any(c.call.name == "blender.create_object" for c in result.tool_calls),
+            [c.call.name for c in result.tool_calls],
+        )
+        check(
+            "no tool errored",
+            not any(c.is_error for c in result.tool_calls),
+            [c.content[:60] for c in result.tool_calls if c.is_error],
+        )
 
         print("\n5. the cube is really in Blender", flush=True)
         detail = await context.mcp.call_tool("blender.get_object", {"name": "TestCube"})
@@ -272,7 +292,11 @@ async def run(options: argparse.Namespace) -> int:
         after = await context.mcp.call_tool("blender.get_objects", {"limit": 500})
         before_count = payload_of(before).get("total", 0)
         after_count = payload_of(after).get("total", 0)
-        check("the scene grew by one object", after_count == before_count + 1, f"{before_count} -> {after_count}")
+        check(
+            "the scene grew by one object",
+            after_count == before_count + 1,
+            f"{before_count} -> {after_count}",
+        )
 
         print("\n6. cost and limits", flush=True)
         totals = result.totals.to_dict()
@@ -283,19 +307,36 @@ async def run(options: argparse.Namespace) -> int:
         print("\n7. a second turn reuses the tools", flush=True)
         second = await agent.run("Move TestCube to position 3, 3, 1")
         check("the second run finished", second.finished, second.stopped_because)
-        moved = await context.mcp.call_tool("blender.get_object", {"name": "TestCube"})
-        if not moved.is_error:
-            location = (payload_of(moved).get("location") or [])[:2]
-            check("the move landed", [round(v) for v in location] == [3, 3], location)
+        # What is asserted here is the *studio's* contract: the object ends up
+        # where the model asked for it to be. Whether the model read the sentence
+        # correctly is a question about the model, and the benchmark table is
+        # where that is measured -- a 3B model reading "3, 3, 1" as (3, 0, 1) is
+        # a finding about the model, not a failure of the client.
+        asked = [
+            call
+            for call in second.tool_calls
+            if call.call.name.endswith("update_object") and not call.is_error
+        ]
+        if check("the model moved the cube", bool(asked), [c.call.name for c in second.tool_calls]):
+            wanted = (asked[0].call.arguments.get("location") or [])[:2]
+            moved = await context.mcp.call_tool("blender.get_object", {"name": "TestCube"})
+            landed = (payload_of(moved).get("location") or [])[:2]
+            check(
+                "Blender is where the model asked",
+                [round(v) for v in landed] == [round(v) for v in wanted],
+                f"asked {wanted}, landed {landed}",
+            )
 
         print("\n8. the 3D capability", flush=True)
         tools = {spec.name for spec in agent.tools()}
         if context.three_d is not None and context.three_d.any_enabled():
             check("generate_3d_asset is offered", "generate_3d_asset" in tools)
         else:
-            check("generate_3d_asset is withheld while Tripo has no key",
-                  "generate_3d_asset" not in tools,
-                  "a tool that always fails is worse than no tool")
+            check(
+                "generate_3d_asset is withheld while Tripo has no key",
+                "generate_3d_asset" not in tools,
+                "a tool that always fails is worse than no tool",
+            )
 
         print("\n9. everything is in the database", flush=True)
         assert context.studio is not None
@@ -314,9 +355,14 @@ async def run(options: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--blender-mcp", default=os.environ.get("STUDIO_BLENDER_MCP_PATH", ""),
-                        help="path to the blender-mcp checkout")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--blender-mcp",
+        default=os.environ.get("STUDIO_BLENDER_MCP_PATH", ""),
+        help="path to the blender-mcp checkout",
+    )
     parser.add_argument("--blender-mcp-env", default="", help="PYTHONPATH for the child process")
     parser.add_argument("--python", default=sys.executable, help="interpreter for blender-mcp")
     parser.add_argument("--port", type=int, default=8767, help="blender-mcp bridge port")

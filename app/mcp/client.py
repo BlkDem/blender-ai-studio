@@ -98,9 +98,7 @@ class MCPSession:
         async with self._lock:
             if self.connected:
                 return self.status
-            self._state = _State(
-                status=ServerStatus(name=self.info.name, state=ConnectionState.CONNECTING)
-            )
+            self._state = _State(status=ServerStatus(name=self.info.name, state=ConnectionState.CONNECTING))
             self._stop = asyncio.Event()
             self._task = asyncio.create_task(self._serve(), name=f"mcp:{self.info.name}")
 
@@ -147,13 +145,13 @@ class MCPSession:
             cwd=self.info.cwd,
         )
         try:
-            async with stdio_client(parameters) as (read, write):
-                async with SdkSession(read, write) as session:
-                    self._state.session = session
-                    await self._handshake(session)
-                    # Stay inside both context managers: the subprocess and the
-                    # client session live exactly as long as this block does.
-                    await self._stop.wait()
+            # Both managers are needed for the session to exist at all: the
+            # subprocess and the client live exactly as long as this block, which
+            # is why the task then waits here instead of returning.
+            async with stdio_client(parameters) as (read, write), SdkSession(read, write) as session:
+                self._state.session = session
+                await self._handshake(session)
+                await self._stop.wait()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - any failure is a connection failure

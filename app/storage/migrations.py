@@ -182,11 +182,8 @@ LATEST_VERSION = max(version for version, _, _ in MIGRATIONS)
 
 async def migrate(database: Database) -> int:
     """Apply anything not yet applied. Returns the resulting version."""
-    row = await database.one("PRAGMA user_version")
-    current = int(row["user_version"]) if row and "user_version" in row else 0
-    if current == 0:
-        current = _read_user_version(database)
-    for version, description, statements in MIGRATIONS:
+    current = await _read_user_version(database)
+    for version, _description, statements in MIGRATIONS:
         if version <= current:
             continue
         await database.script(statements)
@@ -195,8 +192,13 @@ async def migrate(database: Database) -> int:
     return current
 
 
-def _read_user_version(database: Database) -> int:
-    row = database.query_one("PRAGMA user_version")
+async def _read_user_version(database: Database) -> int:
+    """What schema this file is at.
+
+    SQLite returns ``PRAGMA user_version`` as a single, unnamed column, so the
+    value is read positionally rather than by a name that may not be there.
+    """
+    row = await database.one("PRAGMA user_version")
     if not row:
         return 0
-    return int(next(iter(row.values()), 0))
+    return int(next(iter(row.values()), 0) or 0)

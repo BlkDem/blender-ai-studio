@@ -13,11 +13,9 @@ import sys
 import pytest
 
 from app.core.errors import MCPError
-from app.llm.base import ToolCall
 from app.mcp.client import MAX_RESULT_CHARS, MCPSession, _error_code, _render_result, _truncate
 from app.mcp.manager import MCPManager
 from app.mcp.models import ConnectionState, ServerInfo, ToolDescriptor
-
 from tests.conftest import REPO_ROOT  # noqa: E402 - the repo root, already on sys.path
 
 pytestmark = pytest.mark.anyio
@@ -40,9 +38,7 @@ def mcp_config() -> ServerInfo:
 @pytest.fixture
 def second_mcp_config(mcp_config: ServerInfo) -> ServerInfo:
     """A second server with a different catalog, for testing the merge."""
-    return mcp_config.model_copy(
-        update={"name": "test-mcp-two", "args": ["-m", "app.mcp.support_two"]}
-    )
+    return mcp_config.model_copy(update={"name": "test-mcp-two", "args": ["-m", "app.mcp.support_two"]})
 
 
 async def test_connecting_discovers_tools_and_resources(mcp_config: ServerInfo) -> None:
@@ -124,8 +120,12 @@ async def test_a_disconnected_session_refuses_to_call(mcp_config: ServerInfo) ->
 
 async def test_a_server_that_never_starts_fails_fast_and_says_so() -> None:
     session = MCPSession(
-        ServerInfo(name="broken", command=sys.executable, args=["-c", "import nonexistent_module_xyz"],
-                   connect_timeout=10.0)
+        ServerInfo(
+            name="broken",
+            command=sys.executable,
+            args=["-c", "import nonexistent_module_xyz"],
+            connect_timeout=10.0,
+        )
     )
     status = await session.connect()
     assert status.state is ConnectionState.FAILED
@@ -208,9 +208,7 @@ async def test_two_servers_offering_the_same_tool_is_reported(
 
 async def test_one_dead_server_does_not_stop_the_others(mcp_config: ServerInfo) -> None:
     manager = MCPManager()
-    manager.configure(
-        [mcp_config, ServerInfo(name="dead", command="definitely-not-a-real-binary-xyz")]
-    )
+    manager.configure([mcp_config, ServerInfo(name="dead", command="definitely-not-a-real-binary-xyz")])
     try:
         statuses = {status.name: status for status in await manager.connect_all()}
         assert statuses["test-mcp"].ready

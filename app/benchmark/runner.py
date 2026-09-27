@@ -34,7 +34,6 @@ from app.core.agent import Agent
 from app.core.cost import Budget, CostTotals
 from app.core.errors import StudioError
 from app.core.events import EventBus, EventType
-from app.llm.base import LLMProvider
 from app.llm.models import ModelInfo
 from app.llm.registry import LLMRegistry
 from app.mcp.manager import MCPManager
@@ -144,9 +143,7 @@ class Comparison:
         warnings = [o for o in self.outcomes if o.scene_reset != RESET_VERIFIED]
         if warnings:
             lines.append("")
-            lines.append(
-                f"{len(warnings)} run(s) were not scene-isolated; their results are not comparable."
-            )
+            lines.append(f"{len(warnings)} run(s) were not scene-isolated; their results are not comparable.")
         return "\n".join(lines)
 
     def fastest(self) -> RunOutcome | None:
@@ -204,11 +201,7 @@ class BenchmarkRunner:
             # The operator has not enabled execute_python, so the reset is the
             # copy alone. Recorded as such rather than claimed.
             return RESET_COPY_ONLY
-        code = (
-            "import bpy\n"
-            f"bpy.ops.wm.open_mainfile(filepath={str(staged)!r})\n"
-            "result = True"
-        )
+        code = f"import bpy\nbpy.ops.wm.open_mainfile(filepath={str(staged)!r})\nresult = True"
         outcome = await self.mcp.call_tool("blender.execute_python", {"code": code}, timeout=120.0)
         if outcome.is_error:
             logger.warning("could not open the staged scene: %s", outcome.text[:120])
@@ -301,9 +294,7 @@ class BenchmarkRunner:
             for model in models:
                 if self._cancelled:
                     break
-                self.bus.emit(
-                    EventType.INFO, message=f"benchmark: {model.label()} on {task.label()}"
-                )
+                self.bus.emit(EventType.INFO, message=f"benchmark: {model.label()} on {task.label()}")
                 outcome = await self.run_task_for_model(task, model, blend=blend, task_index=task_index)
                 comparison.outcomes.append(outcome)
                 if persist is not None:

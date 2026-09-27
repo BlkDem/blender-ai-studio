@@ -108,7 +108,12 @@ class LLMRegistry:
             return False
         if config.kind == "mock":
             return True
-        return bool(self._api_key(name))
+        if self._api_key(name):
+            return True
+        # A server on this machine -- vLLM, Ollama, llama.cpp -- usually needs no
+        # key, and telling a user "no API key" about their own localhost is a
+        # confusing way to say "ready".
+        return _is_local_url(config.base_url)
 
     # --- providers ---------------------------------------------------------
 
@@ -137,8 +142,7 @@ class LLMRegistry:
             )
         provider_class, default_base, key_env = entry
         catalog = [
-            model if isinstance(model, ModelInfo) else ModelInfo.from_dict(model)
-            for model in config.models
+            model if isinstance(model, ModelInfo) else ModelInfo.from_dict(model) for model in config.models
         ]
         if catalog:
             for model in catalog:
@@ -257,6 +261,16 @@ class LLMRegistry:
             except Exception:  # pragma: no cover - shutdown is best effort
                 logger.debug("closing %s failed", provider.name, exc_info=True)
         self._providers.clear()
+
+
+def _is_local_url(url: str) -> bool:
+    """Whether this base URL points at this machine."""
+    if not url:
+        return False
+    lowered = url.lower()
+    return any(
+        host in lowered for host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "host.docker.internal")
+    )
 
 
 def registry_from_settings(settings: Any, secrets: SecretStore | None = None) -> LLMRegistry:

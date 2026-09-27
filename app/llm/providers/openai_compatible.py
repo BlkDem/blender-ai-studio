@@ -199,9 +199,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
         for index, call in calls.items():
             call.arguments = _parse_arguments(collected.get(index, ""))
-            yield StreamChunk(
-                type="tool_end", call_id=call.id, name=call.name, arguments=call.arguments
-            )
+            yield StreamChunk(type="tool_end", call_id=call.id, name=call.name, arguments=call.arguments)
 
         if usage is not None:
             yield StreamChunk(type="usage", usage=usage)
@@ -211,9 +209,7 @@ class OpenAICompatibleProvider(LLMProvider):
             finish_reason=finish,
             arguments=None,
         )
-        logger.debug(
-            "%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000
-        )
+        logger.debug("%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000)
 
     # --- pricing -----------------------------------------------------------
 
@@ -225,7 +221,9 @@ class OpenAICompatibleProvider(LLMProvider):
         """
         model = next((m for m in self.model_catalog if m.id == model_id), None)
         if model is not None:
-            usage.cost_usd = cost_of(model, usage.input_tokens, usage.output_tokens, cached_tokens=usage.cached_tokens)
+            usage.cost_usd = cost_of(
+                model, usage.input_tokens, usage.output_tokens, cached_tokens=usage.cached_tokens
+            )
         return usage
 
     async def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
@@ -256,19 +254,37 @@ class OpenAIProvider(OpenAICompatibleProvider):
 #: A deployment the studio has never heard of still works; it just shows no price.
 _OPENAI_CATALOG = [
     ModelInfo(
-        id="gpt-4o-mini", provider="openai", display_name="GPT-4o mini",
-        supports_vision=True, supports_images=True, context_window=128_000,
-        max_output_tokens=16_384, input_price=0.15, output_price=0.60,
+        id="gpt-4o-mini",
+        provider="openai",
+        display_name="GPT-4o mini",
+        supports_vision=True,
+        supports_images=True,
+        context_window=128_000,
+        max_output_tokens=16_384,
+        input_price=0.15,
+        output_price=0.60,
     ),
     ModelInfo(
-        id="gpt-4o", provider="openai", display_name="GPT-4o",
-        supports_vision=True, supports_images=True, supports_thinking=True,
-        context_window=128_000, max_output_tokens=16_384, input_price=2.50, output_price=10.00,
+        id="gpt-4o",
+        provider="openai",
+        display_name="GPT-4o",
+        supports_vision=True,
+        supports_images=True,
+        supports_thinking=True,
+        context_window=128_000,
+        max_output_tokens=16_384,
+        input_price=2.50,
+        output_price=10.00,
     ),
     ModelInfo(
-        id="o3-mini", provider="openai", display_name="o3-mini",
-        supports_thinking=True, context_window=200_000, max_output_tokens=100_000,
-        input_price=1.10, output_price=4.40,
+        id="o3-mini",
+        provider="openai",
+        display_name="o3-mini",
+        supports_thinking=True,
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price=1.10,
+        output_price=4.40,
     ),
 ]
 

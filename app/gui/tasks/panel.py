@@ -7,6 +7,7 @@ the work, so this table and the database row agree by construction.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from PySide6.QtCore import Qt, Signal
@@ -92,20 +93,14 @@ class TasksPanel(QWidget):
             if widget is not None and widget.text() in ("succeeded", "failed", "cancelled"):
                 self.table.removeRow(row)
                 self._rows.pop(task_id, None)
-        self._rows = {
-            task_id: row for task_id, row in self._rows.items() if row < self.table.rowCount()
-        }
+        self._rows = {task_id: row for task_id, row in self._rows.items() if row < self.table.rowCount()}
 
     def totals(self) -> dict[str, float]:
         """Credits and cost in the table, summed."""
         credits = cost = 0.0
         for row in range(self.table.rowCount()):
-            try:
+            with contextlib.suppress(AttributeError, ValueError):
                 credits += float(self.table.item(row, 6).text() or 0)
-            except (AttributeError, ValueError):
-                pass
-            try:
+            with contextlib.suppress(AttributeError, ValueError):
                 cost += float((self.table.item(row, 7).text() or "$0").lstrip("$"))
-            except (AttributeError, ValueError):
-                pass
         return {"credits": credits, "cost_usd": cost}

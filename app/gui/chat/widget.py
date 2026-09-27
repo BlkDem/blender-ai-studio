@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.gui.bridge import elide, format_duration, format_money
+from app.gui.bridge import elide
 
 #: Enough of a tool result to recognise it. A whole scene's object list in a chat
 #: bubble is unreadable, and the full text is one click away in the card.
@@ -55,6 +55,10 @@ class ToolCallCard(QFrame):
         self.tool = tool
         self.setObjectName("tool-card")
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        # Maximum, not Preferred: a Qt layout hands leftover space to items that
+        # can grow before it honours a stretch, so a single tool card in an empty
+        # transcript would otherwise fill the whole panel.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.setStyleSheet(
             """
             #tool-card {
@@ -90,7 +94,11 @@ class ToolCallCard(QFrame):
         mark = "✗" if is_error else "✓"
         colour = ROLE_COLOURS["error"] if is_error else ROLE_COLOURS["tool"]
         suffix = f" · {images} image(s)" if images else ""
-        self.header.setText(f"{mark} {self.tool} · {duration_ms:.0f} ms{suffix}")
+        # Sub-second calls differ by a few tens of milliseconds, which rounding
+        # to whole milliseconds hides: two different calls showing "213 ms" reads
+        # as a bug in the measurement.
+        shown = f"{duration_ms / 1000:.2f} s" if duration_ms >= 1000 else f"{duration_ms:.0f} ms"
+        self.header.setText(f"{mark} {self.tool} · {shown}{suffix}")
         self.header.setStyleSheet(f"color: {colour.name()};")
         body = pretty_json(text)
         self.detail.setText(elide(body, PREVIEW_CHARS))
@@ -106,6 +114,7 @@ class MessageBubble(QFrame):
         super().__init__(parent)
         self.role = role
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         colour = ROLE_COLOURS.get(role, ROLE_COLOURS["system"])
         self.setStyleSheet(
             f"""
@@ -125,11 +134,19 @@ class MessageBubble(QFrame):
         self.body = QTextEdit()
         self.body.setReadOnly(True)
         self.body.setFrameShape(QFrame.Shape.NoFrame)
-        self.body.setFont(QFont() if role != "user" else QFont())
+        self.body.setFont(QFont())
+        self.body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Hug the text. Left to its own policy a QTextEdit stretches to fill the
+        # transcript, so a one-line answer occupies a screen.
+        self.body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.body.setText(text)
-        self.body.setMinimumHeight(40)
-        self.body.setMaximumHeight(220)
+        self._fit()
         layout.addWidget(self.body)
+
+    def _fit(self) -> None:
+        """Size the body to its content, up to a readable maximum."""
+        height = int(self.body.document().size().height()) + 12
+        self.body.setFixedHeight(max(24, min(240, height)))
 
     def append(self, text: str) -> None:
         """Streaming in. The cursor follows, because a stream that scrolls away
@@ -138,6 +155,7 @@ class MessageBubble(QFrame):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.insertText(text)
         self.body.setTextCursor(cursor)
+        self._fit()
         self.body.ensureCursorVisible()
 
 
@@ -226,7 +244,9 @@ class ChatView(QWidget):
         self._transcript_layout.insertWidget(self._transcript_layout.count() - 1, card)
         return card
 
-    def finish_tool(self, call_id: str, *, is_error: bool, text: str, duration_ms: float, images: int = 0) -> None:
+    def finish_tool(
+        self, call_id: str, *, is_error: bool, text: str, duration_ms: float, images: int = 0
+    ) -> None:
         card = self._cards.get(call_id)
         if card is None:
             return

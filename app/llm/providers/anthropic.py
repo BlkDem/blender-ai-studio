@@ -124,7 +124,9 @@ class AnthropicProvider(LLMProvider):
         try:
             response = await self._http().post("/v1/messages", json=self._payload(request, stream=False))
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Anthropic request failed: {exc}", provider=self.name, retryable=True) from exc
+            raise ProviderError(
+                f"Anthropic request failed: {exc}", provider=self.name, retryable=True
+            ) from exc
         if response.status_code >= 400:
             raise _error_for(self.name, response.status_code, response.content)
         payload = _json(response)
@@ -170,7 +172,11 @@ class AnthropicProvider(LLMProvider):
                     elif kind == "content_block_start":
                         index = int(event.get("index", 0))
                         block = event.get("content_block") or {}
-                        blocks[index] = {"type": block.get("type"), "id": block.get("id"), "name": block.get("name")}
+                        blocks[index] = {
+                            "type": block.get("type"),
+                            "id": block.get("id"),
+                            "name": block.get("name"),
+                        }
                         partial[index] = ""
                         if block.get("type") == "tool_use":
                             yield StreamChunk(
@@ -230,13 +236,13 @@ class AnthropicProvider(LLMProvider):
                             provider=self.name,
                         )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"Anthropic stream failed: {exc}", provider=self.name, retryable=True) from exc
+            raise ProviderError(
+                f"Anthropic stream failed: {exc}", provider=self.name, retryable=True
+            ) from exc
 
         if not usage_sent:
             yield StreamChunk(type="usage", usage=usage)
-        yield StreamChunk(
-            type="end", text="".join(text), finish_reason=finish, reasoning="".join(reasoning)
-        )
+        yield StreamChunk(type="end", text="".join(text), finish_reason=finish, reasoning="".join(reasoning))
         logger.debug("%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000)
 
     def price(self, model_id: str, usage: Usage) -> Usage:
@@ -288,8 +294,9 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
             )
             wire.append({"role": "assistant", "content": blocks})
         else:
-            wire.append({"role": "assistant" if message.role is Role.ASSISTANT else "user",
-                         "content": message.text()})
+            wire.append(
+                {"role": "assistant" if message.role is Role.ASSISTANT else "user", "content": message.text()}
+            )
     flush()
     return "\n\n".join(chunk for chunk in system_chunks if chunk), wire
 

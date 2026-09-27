@@ -20,8 +20,7 @@ async def test_migrations_apply_and_record_their_version(raw_database: Database)
     assert version == LATEST_VERSION
 
     tables = {
-        row["name"]
-        for row in await raw_database.all("SELECT name FROM sqlite_master WHERE type = 'table'")
+        row["name"] for row in await raw_database.all("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert {"projects", "conversations", "messages", "tool_calls", "settings"} <= tables
     assert {"llm_requests", "three_d_tasks"} <= tables
@@ -107,9 +106,7 @@ async def test_opening_an_impossible_path_is_a_storage_error(tmp_path: Path) -> 
 def test_a_child_process_environment_is_explicit(tmp_path: Path) -> None:
     """The GUI's port must win over a stale shell variable, or the user will be
     talking to a Blender that is not the one they are looking at."""
-    config = MCPServerConfig(
-        command="python", blender_port=9999, env={"BLENDER_PORT": "1234", "EXTRA": "1"}
-    )
+    config = MCPServerConfig(command="python", blender_port=9999, env={"BLENDER_PORT": "1234", "EXTRA": "1"})
     env = config.child_env()
     assert env["BLENDER_PORT"] == "9999"
     assert env["EXTRA"] == "1"
@@ -122,6 +119,48 @@ def test_settings_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> 
     settings = Settings()
     assert settings.log_level == "DEBUG"
     assert settings.theme == "dark"
+
+
+async def test_mcp_servers_survive_a_restart(data_dir: Path) -> None:
+    """The GUI writes servers as dicts, so a restart must rebuild the objects.
+
+    Anything else and the studio comes back with an ``AttributeError`` about a
+    string, which says nothing about which setting is wrong.
+    """
+    from app.core.context import mcp_server_info
+    from app.core.settings import MCPServerConfig
+
+    studio = await Studio.open(data_dir / "restart.db")
+    try:
+        config = MCPServerConfig(
+            name="Blender MCP",
+            command="/usr/bin/python3.11",
+            args=["-m", "server.main"],
+            cwd="/x",
+            blender_port=8767,
+        )
+        await studio.settings.set("mcp_servers", [config.model_dump()])
+        settings = Settings(data_dir=data_dir)
+        settings.apply_overrides(await studio.settings.all())
+        info = mcp_server_info(settings.mcp_servers[0])
+        assert info.env["BLENDER_PORT"] == "8767", "the bridge address reaches the child"
+    finally:
+        studio.close()
+
+
+def test_a_malformed_server_setting_says_what_is_wrong() -> None:
+    from app.core.context import mcp_server_info
+    from app.core.errors import ConfigurationError
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        mcp_server_info(["blender-mcp"])  # type: ignore[arg-type]
+    assert "STUDIO_MCP_SERVERS" in (excinfo.value.hint or "")
+
+    # A server with no command is *valid* configuration and is refused when it is
+    # connected, with a message that says why.
+    from app.core.context import mcp_server_info as build
+
+    assert build({"name": "no command"}).command == ""  # type: ignore[arg-type]
 
 
 async def test_a_backup_is_a_usable_database(data_dir: Path, studio: Studio) -> None:
@@ -153,10 +192,7 @@ async def test_concurrent_writes_do_not_raise(tmp_path: Path) -> None:
     try:
         conversation = await studio.conversations.create(None, "Busy")
         await asyncio.gather(
-            *(
-                studio.messages.add(conversation.id, "user", f"message {index}")
-                for index in range(20)
-            )
+            *(studio.messages.add(conversation.id, "user", f"message {index}") for index in range(20))
         )
         stored = await studio.messages.list(conversation.id)
         assert len(stored) == 20

@@ -33,6 +33,11 @@ class ScenePanel(QWidget):
     #: when it is read off the instance, and an instance attribute would shadow
     #: that with the raw Signal object, which has no ``connect``.
     refresh_requested = Signal()
+    #: A transaction the agent opened but never closed. The studio cannot see the
+    #: add-on's state through MCP, so recovery is an explicit button rather than
+    #: magic: committing or rolling back is the user's decision.
+    commit_transaction = Signal()
+    rollback_transaction = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -46,6 +51,16 @@ class ScenePanel(QWidget):
         self.refresh.setObjectName("scene-refresh")
         self.refresh.clicked.connect(self.refresh_requested)
         row.addWidget(self.refresh)
+        self.commit_button = QPushButton("Commit transaction")
+        self.commit_button.setObjectName("scene-commit")
+        self.commit_button.setToolTip("Keep everything the open transaction changed")
+        self.commit_button.clicked.connect(self.commit_transaction.emit)
+        self.rollback_button = QPushButton("Roll back transaction")
+        self.rollback_button.setObjectName("scene-rollback")
+        self.rollback_button.setToolTip("Put back everything the open transaction changed")
+        self.rollback_button.clicked.connect(self.rollback_transaction.emit)
+        row.addWidget(self.commit_button)
+        row.addWidget(self.rollback_button)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -96,7 +111,9 @@ class ScenePanel(QWidget):
         self.fields["camera"].setText(str(self._scene.get("active_camera") or "—"))
         self.fields["engine"].setText(str(self._scene.get("render_engine") or "—"))
         self.fields["frame"].setText(str(self._scene.get("frame", "—")))
-        self.fields["updated"].setText(format_clock(self._scene.get("_read_at", 0.0)) if self._scene.get("_read_at") else "—")
+        self.fields["updated"].setText(
+            format_clock(self._scene.get("_read_at", 0.0)) if self._scene.get("_read_at") else "—"
+        )
 
         self.tree.clear()
         for entry in self._objects:
