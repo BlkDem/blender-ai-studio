@@ -130,9 +130,12 @@ class MockLLMProvider(LLMProvider):
         if turn.error is not None:
             raise turn.error
         yield StreamChunk(type="start")
-        for word in turn.text.split(" "):
-            if word:
-                yield StreamChunk(type="text", text=word + " ")
+        # Word by word, with the space *before* each word after the first, so the
+        # reassembled text is byte-identical to what was scripted. A trailing
+        # space here would quietly break every exact-match assertion downstream.
+        words = [word for word in turn.text.split(" ") if word]
+        for index, word in enumerate(words):
+            yield StreamChunk(type="text", text=(" " if index else "") + word)
         for name, arguments in turn.tool_calls:
             call = ToolCall.new(name, arguments)
             yield StreamChunk(type="tool_start", call_id=call.id, name=call.name)

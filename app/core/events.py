@@ -102,34 +102,51 @@ class EventBus:
 
         return unsubscribe
 
-    async def publish(self, event: Event) -> None:
-        async with self._lock:
-            self._seq += 1
-            event.seq = self._seq
-            self._history.append(event)
-            if len(self._history) > self._history_limit:
-                del self._history[: len(self._history) - self._history_limit]
-            subscribers = list(self._subscribers)
+    def publish_now(self, event: Event) -> list[Any]:
+        """Record the event and hand it to subscribers, synchronously.
 
-        for subscriber in subscribers:
+        History is updated here rather than in a task, because a consumer that
+        asks "what happened in this run" straight after an emit must see it. Only
+        the coroutine results are deferred; a plain callback runs inline, so the
+        GUI's signal emission is not a scheduling race.
+        """
+        self._seq += 1
+        event.seq = self._seq
+        self._history.append(event)
+        if len(self._history) > self._history_limit:
+            del self._history[: len(self._history) - self._history_limit]
+        pending: list[Any] = []
+        for subscriber in list(self._subscribers):
             try:
                 result = subscriber(event)
-                if asyncio.iscoroutine(result):
-                    await result
             except Exception:
                 # One bad subscriber must not stop the run it is watching.
                 logger.exception("event subscriber failed for %s", event.type)
+                continue
+            if asyncio.iscoroutine(result):
+                pending.append(result)
+        return pending
+
+    async def publish(self, event: Event) -> None:
+        for pending in self.publish_now(event):
+            try:
+                await pending
+            except Exception:
+                logger.exception("async event subscriber failed for %s", event.type)
 
     def emit(self, event_type: EventType, *, run_id: str = "", **payload: Any) -> Event:
         """Publish without awaiting. For the synchronous paths that cannot await."""
         event = Event(type=event_type, run_id=run_id, payload=payload)
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:  # pragma: no cover - only from a sync entry point
-            self._seq += 1
-            event.seq = self._seq
-            return event
-        loop.create_task(self.publish(event))
+        pending = self.publish_now(event)
+        if pending:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:  # pragma: no cover - only from a sync entry point
+                for coroutine in pending:
+                    coroutine.close()
+                return event
+            for coroutine in pending:
+                loop.create_task(coroutine)
         return event
 
     def history(self, run_id: str | None = None, limit: int | None = None) -> list[Event]:

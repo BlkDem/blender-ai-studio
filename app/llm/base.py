@@ -216,7 +216,13 @@ def _clean_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(slots=True)
 class ChatRequest:
-    """One turn. The agent builds these; providers consume them."""
+    """One turn. The agent builds these; providers consume them.
+
+    The message list is copied on construction. The agent appends to its own list
+    as the loop goes, and a provider that keeps the request — for a retry, for a
+    log line, for a stream it reads later — would otherwise watch that list grow
+    underneath it and see a conversation that never happened.
+    """
 
     messages: list[Message]
     model: str
@@ -228,6 +234,10 @@ class ChatRequest:
     stop: list[str] = field(default_factory=list)
     timeout: float = 120.0
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.messages = list(self.messages)
+        self.tools = list(self.tools)
 
 
 @dataclass(slots=True)
