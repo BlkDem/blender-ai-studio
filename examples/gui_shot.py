@@ -136,8 +136,8 @@ def main() -> int:
     parser.add_argument(
         "--prompt", default="Create a cube named ShotCube at location 1, 2, 0, then move it to 3, 0, 0."
     )
-    parser.add_argument("--out", type=Path, default=Path("/tmp/opencode/studio-shot.png"))
-    parser.add_argument("--data-dir", type=Path, default=Path("/tmp/opencode/studio-data-shot"))
+    parser.add_argument("--out", type=Path, default=Path("out/studio-shot.png"))
+    parser.add_argument("--data-dir", type=Path, default=Path("out/data"))
     return asyncio.run(run(parser.parse_args()))
 
 

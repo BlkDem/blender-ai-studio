@@ -353,8 +353,8 @@ def main() -> int:
         help="skip generation and import this GLB instead, for testing the import half",
     )
     parser.add_argument("--cleanup", action="store_true", help="delete the imported asset afterwards")
-    parser.add_argument("--out-dir", type=Path, default=Path("/tmp/opencode/assets"))
-    parser.add_argument("--data-dir", type=Path, default=Path("/tmp/opencode/studio-data-asset"))
+    parser.add_argument("--out-dir", type=Path, default=Path("out/assets"))
+    parser.add_argument("--data-dir", type=Path, default=Path("out/data"))
     options = parser.parse_args()
     options.out_dir.mkdir(parents=True, exist_ok=True)
     options.data_dir.mkdir(parents=True, exist_ok=True)

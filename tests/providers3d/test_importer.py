@@ -23,8 +23,6 @@ from app.providers3d.importer import (
     import_asset,
 )
 
-GLB = Path("/tmp/opencode/assets/Fixture.glb")
-
 
 class ImportMCP(MCPManager):
     """A bridge that answers the two tools the import needs."""

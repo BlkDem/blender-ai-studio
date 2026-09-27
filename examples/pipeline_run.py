@@ -145,18 +145,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="The 3D pipeline against a real Blender.")
     add_common_arguments(parser)
     parser.add_argument("--prompt", default="a medieval wooden chest")
-    parser.add_argument("--assets", type=Path, default=Path("/mnt/c/Users/maxim/blender-mcp-demo/out"))
+    parser.add_argument(
+        "--assets",
+        type=Path,
+        default=Path("out/assets"),
+        help="where the mock provider writes; it must be somewhere Blender can read",
+    )
     parser.add_argument("--cleanup", action="store_true", help="delete the generated asset afterwards")
-    parser.add_argument("--data-dir", type=Path, default=Path("/tmp/opencode/studio-data-pipeline"))
+    parser.add_argument("--data-dir", type=Path, default=Path("out/data"))
     parser.add_argument(
         "--fixture",
         type=Path,
-        default=Path("/mnt/c/Users/maxim/blender-mcp-demo/out/Fixture.glb"),
-        help="a real GLB for the mock provider to serve",
+        default=None,
+        help="a real GLB for the mock provider to serve, if there is one to hand",
     )
     options = parser.parse_args()
     options.data_dir.mkdir(parents=True, exist_ok=True)
     options.assets.mkdir(parents=True, exist_ok=True)
+    if options.fixture is not None and not options.fixture.exists():
+        print(f"No such file: {options.fixture}", file=sys.stderr)
+        return 1
     return asyncio.run(run(options))
 
 
