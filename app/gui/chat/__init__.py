@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from app.gui.chat.history import HistoryPopup
 from app.gui.chat.widget import ChatView, MessageBubble, ToolCallCard
 
-__all__ = ["ChatView", "MessageBubble", "ToolCallCard"]
+__all__ = ["ChatView", "HistoryPopup", "MessageBubble", "ToolCallCard"]

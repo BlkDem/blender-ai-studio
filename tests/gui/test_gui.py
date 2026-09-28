@@ -25,6 +25,7 @@ import pytest  # noqa: E402
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtGui import QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 #: One pixel, so a card can be asked to show a real image.
@@ -36,7 +37,14 @@ from app.core.events import Event, EventBus, EventType  # noqa: E402
 from app.core.settings import Settings  # noqa: E402
 from app.gui.benchmark.panel import BenchmarkPanel  # noqa: E402
 from app.gui.bridge import elide, format_duration, format_money  # noqa: E402
-from app.gui.chat.widget import ChatView  # noqa: E402
+from app.gui.chat.widget import (  # noqa: E402
+    MAX_ATTACHMENTS,
+    MAX_IMAGE_BYTES,
+    MAX_IMAGE_SIDE,
+    ChatView,
+    encode_image,
+    image_suffix,
+)
 from app.gui.models.panel import ModelsPanel  # noqa: E402
 from app.gui.scene.panel import ScenePanel  # noqa: E402
 from app.gui.settings.panel import SettingsPanel  # noqa: E402
@@ -180,11 +188,11 @@ def test_the_send_button_is_disabled_while_a_run_is_in_flight(qapp) -> None:
 
 def test_a_submitted_message_empties_the_input(qapp) -> None:
     view = ChatView()
-    sent: list[str] = []
-    view.submitted.connect(sent.append)
+    sent: list[tuple[str, list[str]]] = []
+    view.submitted.connect(lambda text, images: sent.append((text, list(images))))
     view.input.setText("  hello  ")
     view._submit()  # noqa: SLF001 - the return key path, which the test drives
-    assert sent == ["hello"]
+    assert sent == [("hello", [])]
     assert view.input.text() == ""
 
 
@@ -196,6 +204,213 @@ def test_a_long_tool_result_is_ellipsised_in_the_card_but_kept_in_the_tooltip(qa
     card = view._cards["c3"]  # noqa: SLF001
     assert len(card.detail.text()) < 1000
     assert len(card.full_text()) == 5000
+
+
+# --- attached pictures ------------------------------------------------------
+
+#: A 2x2 PNG, built by Qt so the test needs no image library and no fixture file.
+TINY_PNG = base64.b64encode(
+    base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFElEQVR4nGP8z4AATAxIYBQMEQAAWAQB9Ji0lGAAAAABJRU5ErkJggg=="
+    )
+).decode()
+
+
+def _png(width: int, height: int) -> str:
+    image = QImage(width, height, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.red)
+    return encode_image(image)
+
+
+def test_a_pasted_picture_is_staged_and_sent_with_the_message(qapp) -> None:
+    view = ChatView()
+    sent: list[tuple[str, list[str]]] = []
+    view.submitted.connect(lambda text, images: sent.append((text, list(images))))
+    data = _png(4, 4)
+    assert view.add_attachment(data) is True
+    assert view.attachments() == [data]
+    view.input.setText("build this")
+    view._submit()  # noqa: SLF001
+    assert sent[0][0] == "build this"
+    assert sent[0][1] == [data]
+
+
+def test_a_picture_alone_is_still_a_message(qapp) -> None:
+    """Paste a screenshot, hit Enter, say nothing: that is a turn, not an empty one."""
+    view = ChatView()
+    sent: list[tuple[str, list[str]]] = []
+    view.submitted.connect(lambda text, images: sent.append((text, list(images))))
+    view.add_attachment(_png(4, 4))
+    view._submit()  # noqa: SLF001
+    assert len(sent) == 1
+    assert sent[0][0] == ""
+    assert len(sent[0][1]) == 1
+
+
+def test_an_empty_composer_sends_nothing(qapp) -> None:
+    view = ChatView()
+    sent: list[tuple[str, list[str]]] = []
+    view.submitted.connect(lambda text, images: sent.append((text, list(images))))
+    view._submit()  # noqa: SLF001
+    assert sent == []
+
+
+def test_attachments_are_taken_not_copied(qapp) -> None:
+    """A staged picture goes out once. Left behind, it would ride into a later
+    turn the user never attached it to."""
+    view = ChatView()
+    sent: list[tuple[str, list[str]]] = []
+    view.submitted.connect(lambda text, images: sent.append((text, list(images))))
+    data = _png(4, 4)
+    view.add_attachment(data)
+    view.input.setText("first")
+    view._submit()  # noqa: SLF001
+    view.input.setText("second")
+    view._submit()  # noqa: SLF001
+    assert sent[0][1] == [data]
+    assert sent[1][1] == []
+    assert view.attachments() == []
+
+
+def test_the_attachment_limit_is_reported_not_silently_applied(qapp) -> None:
+    view = ChatView()
+    refusals: list[str] = []
+    view.rejected_attachment.connect(refusals.append)
+    data = _png(4, 4)
+    for _ in range(MAX_ATTACHMENTS):
+        assert view.add_attachment(data) is True
+    assert view.add_attachment(data) is False
+    assert len(view.attachments()) == MAX_ATTACHMENTS
+    assert refusals and str(MAX_ATTACHMENTS) in refusals[0]
+
+
+def test_a_removed_attachment_does_not_go_out(qapp) -> None:
+    view = ChatView()
+    view.add_attachment(_png(4, 4))
+    view.add_attachment(_png(4, 4))
+    view._remove_attachment(0)  # noqa: SLF001
+    assert len(view.attachments()) == 1
+
+
+def test_a_picture_in_the_transcript_is_the_one_that_was_sent(qapp) -> None:
+    view = ChatView()
+    data = _png(4, 4)
+    bubble = view.add_message("user", "build this", images=[data])
+    assert bubble.attached == [data]
+
+
+def test_encoding_shrinks_a_picture_that_is_too_large_to_send(qapp) -> None:
+    """A 4K screenshot is megabytes of base64 in a prompt. It is scaled down to
+    the side limit, and the caller gets a payload within the byte budget."""
+    data = _png(3000, 2000)
+    assert len(base64.b64decode(data)) <= MAX_IMAGE_BYTES
+    decoded = QImage()
+    assert decoded.loadFromData(base64.b64decode(data), "PNG") is True
+    assert max(decoded.width(), decoded.height()) <= MAX_IMAGE_SIDE
+
+
+def test_encoding_refuses_something_that_is_not_an_image(qapp) -> None:
+    """A drop of a text file has to leave the composer alone, not raise."""
+    assert encode_image(QImage()) == ""
+    assert encode_image(QImage(4, 4, QImage.Format.Format_RGB32)) != ""
+
+
+def test_a_pasted_picture_never_lands_as_text_in_the_composer(qapp) -> None:
+    """The failure this replaces: a QLineEdit drops a pasted image with no sign
+    it was offered, so the screenshot simply never arrives."""
+    from PySide6.QtGui import QClipboard, QGuiApplication
+
+    QGuiApplication.clipboard().setImage(QImage(4, 4, QImage.Format.Format_RGB32), QClipboard.Mode.Clipboard)
+    view = ChatView()
+    view.input.paste()  # noqa: SLF001 - the Ctrl+V path
+    assert view.input.text() == ""
+    assert len(view.attachments()) == 1
+
+
+def test_pasted_text_still_goes_in_as_text(qapp) -> None:
+    from PySide6.QtGui import QClipboard, QGuiApplication
+
+    QGuiApplication.clipboard().setText("just words", QClipboard.Mode.Clipboard)
+    view = ChatView()
+    view.input.paste()  # noqa: SLF001
+    assert view.input.text() == "just words"
+    assert view.attachments() == []
+
+
+def test_the_attachment_strip_appears_only_when_something_is_attached(qapp) -> None:
+    # isHidden, not isVisible: the window is never shown in a test, so a child of
+    # an unshown parent is never "visible" whatever was asked of it.
+    view = ChatView()
+    assert view._attachment_bar.isHidden() is True  # noqa: SLF001
+    view.add_attachment(_png(4, 4))
+    assert view._attachment_bar.isHidden() is False  # noqa: SLF001
+    view.take_attachments()
+    assert view._attachment_bar.isHidden() is True  # noqa: SLF001
+
+
+# --- saving a picture -------------------------------------------------------
+
+
+def test_a_tool_render_can_be_written_out(qapp, tmp_path) -> None:
+    """A render is the thing a person most often wants to keep, and until now
+    the only copy was inside a card that nothing could reach."""
+    from app.gui.chat.widget import ToolCallCard
+
+    png = base64.b64encode(_TINY_PNG).decode()
+    card = ToolCallCard("blender.render_preview")
+    card.set_result(is_error=False, text="{}", duration_ms=10.0, images=1, image_data=[png])
+    label = next(w for w in card.findChildren(QLabel) if w.objectName() == "chat-image")
+    target = tmp_path / "render.png"
+    assert label.save_to(str(target)) is True
+    assert target.read_bytes() == base64.b64decode(png)
+
+
+def test_an_attached_picture_can_be_written_out(qapp, tmp_path) -> None:
+    view = ChatView()
+    data = _png(4, 4)
+    bubble = view.add_message("user", "build this", images=[data])
+    label = next(w for w in bubble.findChildren(QLabel) if w.objectName() == "chat-image")
+    target = tmp_path / "reference.png"
+    assert label.save_to(str(target)) is True
+    assert target.read_bytes() == base64.b64decode(data)
+
+
+def test_a_saved_picture_gets_the_extension_its_bytes_actually_are(qapp) -> None:
+    """An attachment is written as JPEG when PNG would be too large, so the name
+    a save dialog offers has to come from the bytes and not from the path Qt
+    happened to hand us. A .png that is really a JPEG opens in nothing."""
+    assert image_suffix(b"\x89PNG\r\n\x1a\nstuff") == ".png"
+    assert image_suffix(b"\xff\xd8\xff\xe0stuff") == ".jpg"
+    assert image_suffix(b"RIFF\x00\x00\x00\x00WEBPmore") == ".webp"
+    assert image_suffix(b"GIF89a") == ".gif"
+    assert image_suffix(b"not a picture at all") == ".png"
+
+
+def test_the_suggested_name_carries_the_right_extension(qapp) -> None:
+    view = ChatView()
+    bubble = view.add_message("user", "", images=[_png(4, 4)])
+    label = next(w for w in bubble.findChildren(QLabel) if w.objectName() == "chat-image")
+    assert label.suggested_name().endswith(".png")
+    assert "blender-ai-studio-" in label.suggested_name()
+
+
+def test_a_picture_that_cannot_be_written_says_so_rather_than_raising(qapp) -> None:
+    view = ChatView()
+    bubble = view.add_message("user", "", images=[_png(4, 4)])
+    label = next(w for w in bubble.findChildren(QLabel) if w.objectName() == "chat-image")
+    # A directory that cannot be created: the write fails, and the user gets a
+    # false rather than a traceback out of a right-click.
+    assert label.save_to("/proc/definitely/not/creatable/render.png") is False
+
+
+def test_finishing_a_card_twice_does_not_stack_two_pictures(qapp) -> None:
+    from app.gui.chat.widget import ToolCallCard
+
+    png = base64.b64encode(_TINY_PNG).decode()
+    card = ToolCallCard("blender.render_preview")
+    card.set_result(is_error=False, text="{}", duration_ms=10.0, images=1, image_data=[png])
+    card.set_result(is_error=False, text="{}", duration_ms=20.0, images=1, image_data=[png])
+    assert len([w for w in card.findChildren(QLabel) if w.objectName() == "chat-image"]) == 1
 
 
 # --- scene ------------------------------------------------------------------
@@ -774,7 +989,7 @@ def test_a_tool_card_shows_the_picture_it_returned(qapp) -> None:
     png = base64.b64encode(_TINY_PNG).decode()
     card = ToolCallCard("blender.render_preview")
     card.set_result(is_error=False, text="{}", duration_ms=2100, images=1, image_data=[png])
-    shown = [w for w in card.findChildren(QLabel) if w.objectName() == "tool-image"]
+    shown = [w for w in card.findChildren(QLabel) if w.objectName() == "chat-image"]
     assert shown, "the picture is in the card"
     assert shown[0].pixmap().width() <= 360, "and scaled to fit the transcript"
     assert "2.10 s" in card.header.text()

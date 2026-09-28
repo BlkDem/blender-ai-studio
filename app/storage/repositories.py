@@ -306,6 +306,39 @@ class MessageRepository:
             for row in rows
         ]
 
+    async def recent_user_texts(self, limit: int = 200) -> list[tuple[str, float]]:
+        """What the person has asked, newest first, across every conversation.
+
+        The history of prompts is not a separate thing that has to be kept in
+        step with the conversation: a prompt *is* a stored user message, so
+        reading them back is a question, not a second record that can drift from
+        the first.
+
+        Consecutive repeats are collapsed, because a person who asks the same
+        thing twice in a row did it because the first answer was not what they
+        wanted, and a list that shows the same line twice hides that. Older
+        repeats survive, because "again, but smaller" two prompts apart is
+        genuinely two things.
+        """
+        rows = await self._db.all(
+            """SELECT content, created_at FROM messages
+               WHERE role = 'user' AND TRIM(content) != ''
+               ORDER BY created_at DESC, rowid DESC
+               LIMIT ?""",
+            (max(1, limit * 2),),
+        )
+        seen: set[str] = set()
+        history: list[tuple[str, float]] = []
+        for row in rows:
+            text = str(row["content"] or "").strip()
+            if text in seen:
+                continue
+            seen.add(text)
+            history.append((text, float(row["created_at"] or 0.0)))
+            if len(history) >= limit:
+                break
+        return history
+
     async def tool_calls_for_run(self, run_id: str) -> Sequence[ToolCallRecord]:
         rows = await self._db.all(
             "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY started_at, rowid", (run_id,)
@@ -515,6 +548,14 @@ class SettingsRepository:
     async def all(self) -> dict[str, Any]:
         rows = await self._db.all("SELECT key, value FROM settings")
         return {row["key"]: json_loads(row["value"], row["value"]) for row in rows}
+
+    async def get(self, key: str, default: Any = None) -> Any:
+        """One value, or the default. Reading the whole table to pick one key out
+        of it is a query shaped by the caller's convenience."""
+        row = await self._db.one("SELECT value FROM settings WHERE key = ?", (key,))
+        if row is None:
+            return default
+        return json_loads(row["value"], row["value"])
 
     async def set(self, key: str, value: Any) -> None:
         await self._db.run(

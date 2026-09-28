@@ -28,7 +28,7 @@ you:          watch the tool cards appear, and the viewport change
 |---|---|
 | [Install](#install) · [Connect Blender](#connect-blender) · [Connect a model](#connect-a-model) · [Check what you configured](#check-what-you-configured) | getting it running |
 | [Your first task](#your-first-task) · [What it looks like](#what-it-looks-like) | using it |
-| [The panels](#the-panels) · [3D generation](#3d-generation) · [The vision loop](#the-vision-loop) · [Projects](#projects) · [Benchmark](#benchmark) | what each part does |
+| [The panels](#the-panels) · [3D generation](#3d-generation) · [The vision loop](#the-vision-loop) · [Memory and prompt history](#memory-and-prompt-history) · [Projects](#projects) · [Benchmark](#benchmark) | what each part does |
 | [Costs and limits](#costs-and-limits) · [Configuration](#configuration) | tuning it |
 | [Testing](#testing) · [Development](#development) · [Roadmap](#roadmap) | working on it |
 | [docs/architecture.md](docs/architecture.md) | how it fits together, and why |
@@ -318,10 +318,65 @@ provider, and the chat card shows it rather than saying how many there were.
 
 Whether a model is *sent* the picture is asked, not assumed: the model catalogue
 declares `supports_vision`, and a text-only model gets the text alone, because
-sending an image to a model that cannot see is a request it rejects.
+sending an image to a model that cannot see is a request it rejects. When that
+happens the window says so and keeps the picture in the transcript — a reference
+that is silently dropped is how "it ignored my image" gets filed as a model's
+fault.
+
+The other direction is the same loop pointed at a picture instead of a render: drop
+a file on the chat, or paste a screenshot, and it goes out with the next message.
+The composer shows what is staged and lets you drop one again, a picture on its own
+is a turn even with no words, and every picture in the transcript — a render or an
+attachment — is saved from it by right-click. A reference that is not in the
+transcript is one the next turn has to be told about again, and a render you can
+only look at through a chat card is not much of a result.
 
 Verified live against Qwen2.5-VL-3B: a real render of the real scene, read across
 the boundary, and the model described what was in it.
+
+## Memory and prompt history
+
+**The model you used last is the one you get.** The selector starts on whatever was
+in use when the window closed, from either the combo or the Models table, and the
+status bar names the model that is actually selected rather than the first
+configured provider. "Used" means used: a run records the model it actually went
+to, not the one the selector happened to be pointing at, and a first run
+remembers nothing rather than inventing a preference and then restoring it
+faithfully forever.
+
+It is stored in the settings table and not in the `.env`, on purpose: a file the
+studio rewrites by itself is a file the user stops trusting. When the remembered
+model is no longer there — renamed, deleted, provider gone — the window says so by
+name and starts on something usable instead, because landing quietly on a
+different model makes a working preference look broken rather than gone.
+
+**The window remembers.** A run's messages were always written to the database,
+and the last conversation was always drawn back on start-up — but neither was
+given to the *model*, so the second turn of a conversation was sent without the
+first. The transcript looked continuous while nothing was, which is worse than an
+obvious break: "it forgot what I asked for" was a correct observation about a bug.
+
+Two halves to it now. Within a session the agent keeps the conversation itself, so
+every turn after the first carries the ones before it. Across sessions the window
+loads the last conversation into the agent when it is built, and **New
+conversation** is what clears it again.
+
+What crosses the gap is a bounded block — the most recent messages, cut to start
+on a question rather than mid-answer, and capped so an old session cannot crowd
+out the current task. Tool *results* are not restored, because they were never
+stored as messages, so a resumed session is told plainly that the block is what
+was said rather than what is in the scene, and to read the scene before acting on
+it. The block is also trimmed so it can never end on a tool call whose result
+never arrived: a provider is entitled to refuse the next request over that.
+
+**The prompts are kept.** Every prompt is already a stored user message, so the
+history is read back rather than kept as a second list that could disagree with
+the conversation it claims to remember. **History** opens them — filterable, with
+Enter taking one into the composer — and **Ctrl+Up** / **Ctrl+Down** walk them
+without leaving the keyboard, the way a shell does, returning to whatever was
+being typed. Asking the same thing twice in a row is one row, because that means
+the first answer was not wanted; asking it again later is two, because by then it
+is a different request.
 
 ## Projects
 
@@ -516,6 +571,10 @@ python examples/live_run.py \
 - [x] Benchmark with isolated runs and manual review
 - [x] Chat, Scene, Tasks, Projects, Benchmark, Models, Settings
 - [x] Vision loop: render, read it across the filesystem, send it, act on it
+- [x] Pictures into the chat: drop or paste an attachment, save any picture out
+- [x] Memory: a turn carries the ones before it, and a reopened window resumes
+- [x] Prompt history: a popup, and Ctrl+Up, read back from the stored prompts
+- [x] Last used model is remembered, and a missing one is reported rather than swapped
 - [x] Projects: named work with a starting `.blend`, and turns filed under it
 - [x] Tasks that outlive the window: stored, and restored on the next launch
 - [x] Multiple MCP servers, editable by name in the window

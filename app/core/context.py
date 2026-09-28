@@ -23,7 +23,7 @@ from app.core.errors import ConfigurationError, ThreeDError
 from app.core.events import EventBus
 from app.core.settings import AgentConfig, BudgetConfig, MCPServerConfig, Settings, ThreeDConfig
 from app.core.task_manager import TaskManager
-from app.llm.base import LLMProvider, ToolSpec
+from app.llm.base import LLMProvider, Message, ToolSpec
 from app.llm.models import ModelInfo
 from app.llm.registry import LLMRegistry, registry_from_settings
 from app.mcp.manager import MCPManager
@@ -172,11 +172,16 @@ class AppContext:
         budget: Budget | None = None,
         conversation_id: str = "",
         project_id: str | None = None,
+        history: Sequence[Message] = (),
     ) -> Agent:
         """An agent wired to this studio's MCP servers, tools and budget.
 
         The model is optional: an empty one means the provider's configured
         default, which is what a user who has set a default expects.
+
+        ``history`` seeds the agent's memory with an earlier session, so the
+        first turn after reopening the window continues it. The agent keeps
+        growing that memory itself from there.
         """
         assert self.llm is not None and self.mcp is not None, "open() first"
         provider, resolved_model = self.llm.resolve(provider_name, model)
@@ -195,6 +200,7 @@ class AppContext:
             conversation_id=conversation_id,
             allow_execute_python=self.settings.agent.allow_execute_python,
             project_id=project_id if project_id is not None else self.current_project,
+            history=history,
         )
 
     def assets_tool(self) -> list[LocalTool]:

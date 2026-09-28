@@ -76,7 +76,14 @@ TOOL_MAX_TOKENS = 2000
 
 #: One word of image description, plus the thinking that precedes it. gpt-5-mini
 #: spends about 190 tokens reasoning about a single pixel before answering.
-VISION_MAX_TOKENS = 800
+#: 800 was enough for one-word answers to a 16x16 swatch and not much else: a
+#: reasoning model asked about a real render runs well past it, and a budget
+#: spent entirely on thinking comes back as finish_reason "length" with no
+#: content at all -- reported as an empty answer, which is a limit and not a
+#: failure to see. Measured on space-bunny-free against a 640x400 Blender render:
+#: 232 to 1893 completion tokens, one truncation in six at 600, none in eight at
+#: 2000. So this is the same budget TOOL_MAX_TOKENS uses, for the same reason.
+VISION_MAX_TOKENS = 2000
 ASK_FOR_TOOL = (
     "Use blender.create_object to create a cylinder named Probe. Call the tool; do not describe it."
 )

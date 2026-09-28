@@ -142,6 +142,68 @@ async def test_a_tool_that_returns_no_picture_changes_nothing() -> None:
     assert result.finished
 
 
+# --- pictures a person attached -------------------------------------------
+
+#: A different payload from the render's, so a test cannot pass by mixing the two.
+REFERENCE = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"reference" * 20).decode()
+
+
+async def test_a_picture_the_user_attached_is_sent_with_the_turn() -> None:
+    """Drop a reference, ask for it to be built: the model has to receive the
+    picture, and on the *first* request -- there is no tool call in between."""
+    provider = SeesImages(turns=[ScriptedTurn(text="unused")], model="test-model")
+    agent = agent_with(provider, vision=True)
+
+    await agent.run("build this", images=[ContentPart.image_part(REFERENCE, "image/png")])
+
+    first = provider.seen[0]
+    images = [part for part in first if part.type == "image"]
+    assert len(images) == 1
+    assert images[0].data == REFERENCE
+    assert images[0].mime_type == "image/png"
+
+
+async def test_an_attached_picture_is_not_sent_to_a_text_only_model() -> None:
+    """The same gate a render goes through, for the same reason: the request
+    would be refused, and the turn would die on a capability the user never
+    asked about."""
+    provider = SeesImages(turns=[ScriptedTurn(text="done")], model="test-model")
+    agent = agent_with(provider, vision=False)
+
+    result = await agent.run("build this", images=[ContentPart.image_part(REFERENCE, "image/png")])
+
+    assert all(parts == [] for parts in provider.seen)
+    assert result.finished
+
+
+async def test_a_picture_with_no_words_is_still_a_turn() -> None:
+    """Paste a screenshot, press Enter, type nothing. The turn carries the image
+    on its own rather than being discarded as an empty message."""
+    provider = SeesImages(turns=[ScriptedTurn(text="A low table.")], model="test-model")
+    agent = agent_with(provider, vision=True)
+
+    result = await agent.run("", images=[ContentPart.image_part(REFERENCE, "image/png")])
+
+    assert provider.seen, "the turn reached the model at all"
+    assert [p for p in provider.seen[0] if p.type == "image"], "carrying the picture"
+    assert result.finished
+
+
+async def test_an_attached_picture_and_a_render_both_arrive() -> None:
+    provider = SeesImages(turns=[ScriptedTurn(text="unused")], model="test-model")
+    agent = agent_with(provider, vision=True)
+
+    await agent.run(
+        "make it like this, then render it",
+        images=[ContentPart.image_part(REFERENCE, "image/png")],
+    )
+
+    first = [p.data for p in provider.seen[0] if p.type == "image"]
+    second = [p.data for p in provider.seen[1] if p.type == "image"]
+    assert first == [REFERENCE], "the reference went out with the words"
+    assert second == [REFERENCE, PNG], "and the render came back on top of it"
+
+
 def test_the_openai_wire_carries_a_data_uri() -> None:
     from app.llm.providers.openai_compatible import _to_wire
 

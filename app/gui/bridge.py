@@ -152,8 +152,15 @@ class CoreThread:
         Every GUI action that touches the network goes through here. A blocking
         call in the Qt thread is how a window stops repainting, and the MCP
         handshake alone takes a second.
+
+        A coroutine that cannot be scheduled is closed rather than dropped. The
+        caller has already built it -- ``self.core.submit(self._read_scene(), …)``
+        evaluates the coroutine before this is entered -- so letting it go
+        un-awaited is a warning at best and a held frame at worst. Closing a
+        window while a task is queued is exactly how that happens.
         """
         if self.loop is None:  # pragma: no cover - start() always runs first
+            coroutine.close()
             raise RuntimeError("the core thread is not running")
         loop = self.loop
 
@@ -161,6 +168,7 @@ class CoreThread:
             try:
                 result = asyncio.run_coroutine_threadsafe(coroutine, loop)
             except RuntimeError as exc:  # loop already closed
+                coroutine.close()
                 self._inbox.put(("error", ("CORE_CLOSED", str(exc))))
                 return
             if on_done is None:
@@ -168,7 +176,13 @@ class CoreThread:
             else:
                 result.add_done_callback(lambda future: self._deliver(future, on_done, *extra))
 
-        self.loop.call_soon_threadsafe(run)
+        try:
+            self.loop.call_soon_threadsafe(run)
+        except RuntimeError:
+            # The loop closed between the check above and this call. The same
+            # reasoning as above, one step later.
+            coroutine.close()
+            raise
 
     def _deliver(self, future: Any, on_done: Callable[..., None], *args: Any) -> None:
         """Hand a finished coroutine's value to the GUI thread."""

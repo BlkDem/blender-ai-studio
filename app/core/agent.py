@@ -68,6 +68,76 @@ failed for the same reason; change something first.
 Keep answers short. The user is watching a 3D viewport, not reading an essay.\
 """
 
+#: How much of an earlier session to hand back to the model, in characters.
+#: Roughly a couple of thousand tokens, which is a few minutes of work: enough
+#: to know what the person was building and what was already tried, and small
+#: enough that the rest of the context is still the current task. The scene
+#: itself is re-read with blender.get_scene, so a longer block buys prose, not
+#: knowledge of what is there.
+RESUME_CHARS = 6000
+
+#: A hard cap on the number of turns, whatever their length. Many one-line turns
+#: fit the budget easily and a model given forty of them starts answering the
+#: wrong one.
+RESUME_TURNS = 12
+
+#: Appended to the system prompt when the run starts on somebody else's words.
+#: The block that comes next is real dialogue from an earlier session, and a
+#: model that is not told that will either ignore it or, worse, assume the tools
+#: it was shown were run again just now.
+RESUMED_NOTE = """\
+The conversation so far was restored from an earlier session. It is what was
+said, not a record of what is in the scene: Blender may have been closed, the
+file may have changed, and the tool results from that session were not kept.
+Read the scene with blender.get_scene before you act on it, and confirm anything
+the earlier turns claimed before you rely on it.\
+"""
+
+
+def history_block(
+    records: Sequence[Any],
+    *,
+    max_chars: int = RESUME_CHARS,
+    max_turns: int = RESUME_TURNS,
+) -> list[Message]:
+    """Stored messages, shaped into something worth sending a model.
+
+    Three rules, each of which is a way the naive version goes wrong:
+
+    * **It starts on a user turn.** Cutting a block mid-conversation can leave an
+      answer as the first thing the model reads, and it will try to continue a
+      reply whose question it cannot see.
+    * **It fits a budget.** An old session can be thousands of messages long, and
+      sending all of it does not make the model better at the current task; it
+      makes the current task the smallest thing in the prompt.
+    * **It keeps the newest end.** The last thing discussed is the thing being
+      continued.
+
+    Only text turns survive: tool results are not stored as messages, so there is
+    nothing of the work itself to restore -- only what was said about it. That is
+    why a resumed session tells the model to read the scene before acting.
+    """
+    usable = [
+        Message(role=Role(str(record.role)), content=(record.content or "").strip())
+        for record in records
+        if str(getattr(record, "role", "")) in ("user", "assistant")
+        and (getattr(record, "content", "") or "").strip()
+    ]
+    kept: list[Message] = []
+    total = 0
+    for message in reversed(usable):  # newest first, so the budget spends itself on the recent end
+        cost = len(message.content)
+        if kept and (total + cost > max_chars or len(kept) >= max_turns * 2):
+            break
+        total += cost
+        kept.append(message)
+    kept.reverse()
+
+    start = 0
+    while start < len(kept) and kept[start].role is not Role.USER:
+        start += 1
+    return kept[start:]
+
 
 @dataclass(slots=True)
 class LocalTool:
@@ -143,6 +213,7 @@ class Agent:
         conversation_id: str = "",
         project_id: str | None = None,
         allow_execute_python: bool = False,
+        history: Sequence[Message] = (),
     ) -> None:
         self.provider = provider
         self.model = model
@@ -167,6 +238,16 @@ class Agent:
         self.project_id = project_id
         self.allow_execute_python = allow_execute_python
         self._runs: dict[str, asyncio.Task[Any]] = {}
+        #: The conversation so far, without the system message. A new run is
+        #: seeded from this and leaves its own messages behind, which is what
+        #: makes the second turn of a conversation able to answer the first.
+        #: Built with ``history`` from an earlier session, so reopening the
+        #: window is a continuation rather than a blank page.
+        self._memory: list[Message] = list(history)
+        #: Set once a run has happened, so the system prompt can say the session
+        #: was resumed. Without it the model is handed a block of prior dialogue
+        #: and told nothing about why.
+        self._resumed = bool(self._memory)
         #: Whether a transaction this agent opened is still open. Tracked here
         #: rather than asked of the add-on, because the agent began every
         #: transaction it cares about — and because a run that stops between
@@ -220,6 +301,8 @@ class Agent:
         # writing it out again in the prompt costs a few hundred tokens on every
         # single request of a run — which is the most expensive kind of duplication
         # there is, because it is paid once per step.
+        if self._resumed:
+            parts.append(RESUMED_NOTE)
         return "\n\n".join(parts)
 
     # --- running -----------------------------------------------------------
@@ -231,8 +314,15 @@ class Agent:
         history: Sequence[Message] = (),
         run_id: str = "",
         conversation_id: str = "",
+        images: Sequence[ContentPart] = (),
     ) -> RunResult:
         """One user turn, to a final answer.
+
+        ``images`` are pictures the person attached to the turn, not a tool's
+        results -- those arrive on their own. They go out under the same
+        capability gate as a render, and for the same reason: a request carrying
+        an image is one a model that cannot see will reject, and the turn dies on
+        a capability the user never asked about.
 
         Raises :class:`~app.core.errors.Cancelled` when the user stops it, and
         :class:`~app.core.errors.BudgetExceeded` when a limit is reached; both
@@ -256,10 +346,16 @@ class Agent:
             tools=[spec.name for spec in self.tools()],
         )
 
+        user_message = Message.user(user_text)
+        if images:
+            user_message.parts = self._image_parts(
+                [part.data for part in images],
+                [part.mime_type or "image/png" for part in images],
+            )
         messages: list[Message] = [
             Message.system(self.build_system_prompt()),
-            *history,
-            Message.user(user_text),
+            *(history if history else self._memory),
+            user_message,
         ]
         result.messages = list(messages)
         if self.studio is not None:
@@ -336,6 +432,12 @@ class Agent:
             self._runs.pop(run_id, None)
             result.elapsed_s = time.perf_counter() - started
             result.totals = self.cost.totals
+            # Whatever happened, what did happen is the conversation now -- but
+            # only if it can be replayed. A run stopped between a tool call and
+            # its result leaves an assistant message promising a tool call that
+            # never came back, and a provider is entitled to refuse the whole
+            # next request over it.
+            self._memory = self._replayable(messages[1:])
 
         self._publish(
             run_id,
@@ -558,6 +660,29 @@ class Agent:
             ContentPart.image_part(data, mime_types[index] if index < len(mime_types) else "image/png")
             for index, data in enumerate(images)
         ]
+
+    @staticmethod
+    def _replayable(messages: Sequence[Message]) -> list[Message]:
+        """The conversation, trimmed to something a provider will accept again.
+
+        An assistant message that asked for tools is only valid when the results
+        of those tools follow it. A run that was cancelled, or that died between
+        the call and the answer, leaves the message promising a call whose result
+        never arrived — and several providers reject the entire next request when
+        they see one, which would turn a stopped run into a broken conversation.
+
+        Also bounded: a long session would otherwise grow the prompt without end,
+        and the same budget as a resumed block applies.
+        """
+        clean = list(messages)
+        while clean and clean[-1].role is Role.ASSISTANT and clean[-1].tool_calls:
+            clean.pop()
+        total = 0
+        for index in range(len(clean) - 1, -1, -1):
+            total += len(clean[index].content)
+            if total > RESUME_CHARS * 4:
+                return clean[index + 1 :]
+        return clean
 
     def _with_recovery_hint(self, tool: str, error_code: str, text: str) -> str:
         """Turn one refusal into a step the model can take.

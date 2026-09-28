@@ -37,19 +37,28 @@ from PySide6.QtWidgets import (
 
 from app.benchmark.runner import BenchmarkRunner, BenchmarkTask, ModelSpec
 from app.benchmark.storage import BenchmarkStorage
+from app.core.agent import history_block
 from app.core.events import EventType
 from app.gui.benchmark.panel import BenchmarkPanel
 from app.gui.bridge import CoreThread, format_money
+from app.gui.chat.history import HistoryPopup
 from app.gui.chat.widget import ChatView
 from app.gui.models.panel import ModelsPanel
 from app.gui.projects.panel import ProjectsPanel
 from app.gui.scene.panel import ScenePanel
 from app.gui.settings.panel import SettingsPanel
 from app.gui.tasks.panel import TasksPanel
+from app.llm.base import ContentPart, Message
 
 logger = logging.getLogger(__name__)
 
 PAGES = ("Chat", "Scene", "Tasks", "Projects", "Benchmark", "Models", "Settings")
+
+#: Which model was in use last, as "provider:model". A preference, not
+#: configuration, so it lives in the settings table and not in the .env: a file
+#: the studio rewrites is a file the user stops trusting, and one whose value the
+#: window has to agree with by hand.
+LAST_MODEL_KEY = "ui.last_model"
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +78,17 @@ class MainWindow(QMainWindow):
         self._agent_provider = ""
         self._agent_gate: bool | None = None
         self._conversation_id = ""
+        #: The restored block, handed to the agent when it is built. Kept here
+        #: rather than read from the database per turn so that the agent is still
+        #: the single owner of what the model has been told.
+        self._history: list[Message] = []
+        #: Filled by _load_models, applied by _models_loaded.
+        self._last_model = ""
+        #: What is already in the settings table, so moving the selector back and
+        #: forth does not write on every step.
+        self._last_saved_model = ""
+        #: Whether the remembered model was found, for the message when it was not.
+        self._remembered = False
         self._cards_by_tool: dict[str, str] = {}
         self._benchmarks = BenchmarkStorage(context.studio.db) if context.studio else None
 
@@ -76,7 +96,10 @@ class MainWindow(QMainWindow):
         self.model_selector = QComboBox()
         self.model_selector.setObjectName("model-selector")
         self.model_selector.setMinimumWidth(240)
-        self.model_selector.currentIndexChanged.connect(self._model_changed)
+        # Through a lambda, not directly: currentIndexChanged passes the new
+        # index, and an index of 0 would land in `remember` and read as False --
+        # so the first model in the list could never be remembered.
+        self.model_selector.currentIndexChanged.connect(lambda _index: self._model_changed())
 
         self.connection_dot = QLabel("●")
         self.connection_dot.setObjectName("connection-dot")
@@ -147,6 +170,11 @@ class MainWindow(QMainWindow):
         self.core.signals.error.connect(self._on_error)
         self.chat.submitted.connect(self.send)
         self.chat.stop_requested.connect(self.stop_run)
+        self.chat.rejected_attachment.connect(
+            lambda why: self.chat.add_note(why, role="error")
+        )
+        self.chat.history_requested.connect(self._open_history)
+        self.chat.new_chat_requested.connect(self._start_new_chat)
         self.scene.refresh_requested.connect(self.refresh_scene)
         self.scene.commit_transaction.connect(
             lambda: self._close_transaction("blender.commit_transaction", "Transaction committed.")
@@ -193,7 +221,30 @@ class MainWindow(QMainWindow):
         self._show_three_d_status()
         self._show_providers()
 
-    # --- projects ----------------------------------------------------------
+    # --- prompt history ----------------------------------------------------
+
+    def _open_history(self) -> None:
+        """Ask the core thread for the prompts, then show them.
+
+        The read goes through the core thread like everything else: a database
+        query on the GUI thread is a frozen window, and the window freezing for
+        the length of a query is how people decide an app has hung.
+        """
+        self.core.submit(self._load_prompt_history(), self._show_history)
+
+    async def _load_prompt_history(self) -> list[tuple[str, float]]:
+        if self.context.studio is None:
+            return []
+        return list(await self.context.studio.messages.recent_user_texts())
+
+    def _show_history(self, prompts: list[tuple[str, float]]) -> None:
+        # The arrow keys walk the whole list, the unfiltered one: what the popup's
+        # filter narrows is what it shows, and narrowing the arrows as a side
+        # effect of browsing would leave them narrow after the popup closed.
+        self.chat.set_prompt_history([text for text, _when in prompts])
+        popup = HistoryPopup(prompts, self)
+        popup.chosen.connect(self.chat.put_prompt)
+        popup.exec()
 
     async def _load_projects(self) -> list[Any]:
         if self.context.studio is None:
@@ -275,13 +326,36 @@ class MainWindow(QMainWindow):
         """Start a fresh conversation, in whatever project is now open."""
         self._agent = None
         self._conversation_id = ""
+        # The model has to be told, or the first turn of the "new" conversation
+        # still carries everything the old one said.
+        self._history = []
+
+    def _start_new_chat(self) -> None:
+        """The New button: a blank window and a model that has forgotten.
+
+        Offered because a window that can only be emptied by closing it is not
+        much of a workspace. The previous conversation stays in the database — it
+        is a record, not something to be destroyed by a second thought.
+        """
+        if self.chat.busy():
+            self.chat.add_note("A run is still going — Stop it first.", role="error")
+            return
+        self._new_conversation()
+        self.chat.clear()
+        self.chat.add_note("New conversation. The last one is still on disk.")
 
     async def _restore_conversation(self) -> int:
-        """Put the last conversation back on screen.
+        """Put the last conversation back on screen *and* back in the model's head.
 
         Closing the window used to throw the transcript away even though every
         message was in the database. Reopening it is what makes the window a
         workspace rather than a slot machine.
+
+        Drawing it and remembering it are two different jobs, and only doing the
+        first is the worse half: the transcript looks continuous while the model
+        has never heard of any of it, so "it forgot what I asked for" is a
+        correct observation about a bug. The block handed to the model is capped
+        and starts on a user turn -- see :func:`app.core.agent.history_block`.
         """
         if self.context.studio is None:
             return 0
@@ -293,9 +367,14 @@ class MainWindow(QMainWindow):
         if not messages:
             return 0
         self._conversation_id = latest.id
+        self._history = history_block(messages)
         self.chat.clear()
         for message in messages:
             self.chat.add_message(message.role, message.content or "")
+        if self._history:
+            self.chat.add_note(
+                f"Resumed — the model has the last {len(self._history)} messages of this session.",
+            )
         return len(messages)
 
     def _tasks_loaded(self, count: int) -> None:
@@ -319,7 +398,23 @@ class MainWindow(QMainWindow):
 
     async def _load_models(self) -> list[dict[str, Any]]:
         assert self.context.llm is not None
+        # Read together with the catalogue rather than in a second submit: the
+        # two callbacks would race, and the one that arrived second would find
+        # an empty selector and silently do nothing.
+        self._last_model = await self._read_last_model()
         return [model.to_dict() for model in self.context.llm.models()]
+
+    async def _read_last_model(self) -> str:
+        if self.context.studio is None:
+            return ""
+        stored = await self.context.studio.settings.get(LAST_MODEL_KEY)
+        return str(stored or "")
+
+    async def _store_last_model(self, chosen: str) -> str:
+        if not chosen or self.context.studio is None:
+            return ""
+        await self.context.studio.settings.set(LAST_MODEL_KEY, chosen)
+        return chosen
 
     def _show_providers(self) -> None:
         """Fill the providers table.
@@ -358,13 +453,32 @@ class MainWindow(QMainWindow):
                 f"{model['id']}  ·  {model['provider']}", f"{model['provider']}:{model['id']}"
             )
         self.model_selector.blockSignals(block)
-        configured = [
-            m for m in models if m.get("provider") and self.context.llm.is_configured(m["provider"])
-        ]
-        if configured:
-            self.llm_status.setText(f"LLM: {configured[0]['provider']} ready")
-        else:
-            self.llm_status.setText("LLM: no API key")
+        # The model that was in use last, if it is still here. Applied with the
+        # signals blocked so remembering a choice does not write it again.
+        restored = self._select_model(self._last_model)
+        self._remembered = restored
+        if self.model_selector.count():
+            self._model_changed(remember=False)
+        if self._last_model and not restored:
+            # Said out loud, because silently landing on another model is how a
+            # preference comes to look broken rather than gone.
+            self.chat.add_note(
+                f"The model you used last ({self._last_model.replace(':', ' · ')}) is not available now, "
+                f"so this session starts on {self.current_model() or 'nothing'}.",
+                role="error",
+            )
+
+    def _select_model(self, chosen: str) -> bool:
+        """Point the selector at "provider:model". False if it is not there."""
+        if not chosen:
+            return False
+        index = self.model_selector.findData(chosen)
+        if index < 0:
+            return False
+        block = self.model_selector.blockSignals(True)
+        self.model_selector.setCurrentIndex(index)
+        self.model_selector.blockSignals(block)
+        return True
 
     def _show_three_d_status(self) -> None:
         three_d = self.context.three_d
@@ -381,15 +495,41 @@ class MainWindow(QMainWindow):
 
     # --- chat --------------------------------------------------------------
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, images: list[str] | None = None) -> None:
         """Start a run. The window stays responsive; the transcript fills in."""
         if not self.current_provider():
             self.chat.add_note("Choose a model first — the selector at the top is empty.", role="error")
             return
-        self.chat.add_message("user", text)
+        pictures = list(images or [])
+        # The gate is the catalogue's, not a guess from the model's name, and it is
+        # asked here as well as inside the agent so a picture the model will never
+        # see is reported to the person who attached it. Silently dropping it is
+        # how "it ignored my image" gets filed as a model problem.
+        if pictures and not self._model_sees_images():
+            self.chat.add_note(
+                f"{self.current_model()} cannot see images — {len(pictures)} attached picture(s) are in the "
+                "transcript but were not sent. Pick a model that declares supports_vision.",
+                role="error",
+            )
+            pictures = []
+        self.chat.add_message("user", text, images=pictures)
         self.chat.set_busy(True)
         self._cards_by_tool.clear()
-        self.core.submit(self._run_agent(text), self._run_finished)
+        # "The last used model" means the one a run actually went to, not the one
+        # the selector happened to be pointing at. Recorded here rather than only
+        # on a deliberate change, so a model restored at start-up is confirmed by
+        # being used rather than merely by having been shown.
+        chosen = self.model_selector.currentData() or ""
+        if chosen and chosen != self._last_saved_model:
+            self._last_saved_model = chosen
+            self.core.submit(self._store_last_model(chosen), lambda _s: None)
+        self.core.submit(self._run_agent(text, pictures), self._run_finished)
+
+    def _model_sees_images(self) -> bool:
+        """Whether the selected model is declared multimodal."""
+        assert self.context.llm is not None
+        info = self.context.llm.find(self.current_provider(), self.current_model())
+        return bool(getattr(info, "supports_vision", False))
 
     def _agent_for_turn(self) -> Any:
         # The gate is read at agent construction, so a change in Settings has to
@@ -402,22 +542,30 @@ class MainWindow(QMainWindow):
         not there.
         """
         gate = self.context.settings.agent.allow_execute_python
-        if self._agent is None or self._agent_provider != self.current_provider() or self._agent_gate != gate:
+        if (
+            self._agent is None
+            or self._agent_provider != self.current_provider()
+            or self._agent_gate != gate
+        ):
             self._agent = self.context.agent(
-                self.current_provider(), self.current_model(), conversation_id=self._conversation_id
+                self.current_provider(),
+                self.current_model(),
+                conversation_id=self._conversation_id,
+                history=self._history,
             )
             self._agent_provider = self.current_provider()
             self._agent_gate = gate
         return self._agent
 
-    async def _run_agent(self, text: str) -> Any:
+    async def _run_agent(self, text: str, images: list[str] | None = None) -> Any:
         agent = self._agent_for_turn()
         # Kept so Stop has something to stop. The agent was built and dropped
         # inside this coroutine, which made the button a no-op that still looked
         # like it worked: the run finished, the UI had already said otherwise.
         self._active_agent = agent
+        parts = [ContentPart.image_part(data, "image/png") for data in images or []]
         try:
-            return await agent.run(text)
+            return await agent.run(text, images=parts)
         finally:
             self._active_agent = None
 
@@ -462,9 +610,28 @@ class MainWindow(QMainWindow):
         data = self.model_selector.currentData() or ""
         return data.split(":", 1)[1] if ":" in data else ""
 
-    def _model_changed(self) -> None:
-        if self.current_provider():
-            self.llm_status.setText(f"LLM: {self.current_provider()}")
+    def _model_changed(self, remember: bool = True) -> None:
+        """The selector moved: say which model, and remember it.
+
+        The status follows the *selected* model. It used to name the first
+        configured provider, which is a different thing whenever the person
+        picked anything else -- a status bar that contradicts the selector is
+        worse than no status bar.
+
+        ``remember`` is off while the selector is being filled: on a first run
+        there is no last-used model, and writing "the first one in the list" would
+        invent a preference and then faithfully restore it forever after.
+        """
+        provider = self.current_provider()
+        if not provider:
+            self.llm_status.setText("LLM: no model")
+            return
+        keyed = self.context.llm is not None and self.context.llm.is_configured(provider)
+        self.llm_status.setText(f"LLM: {self.current_model()} · {provider}" + ("" if keyed else " · no key"))
+        chosen = self.model_selector.currentData() or ""
+        if remember and chosen and chosen != self._last_saved_model:
+            self._last_saved_model = chosen
+            self.core.submit(self._store_last_model(chosen), lambda _s: None)
 
     def _model_selected(self, chosen: str) -> None:
         provider, _, model = chosen.partition(":")
