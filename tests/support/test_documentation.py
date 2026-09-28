@@ -16,6 +16,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 DOCS = [ROOT / "README.md", *sorted((ROOT / "docs").glob("*.md")), ROOT / "CONTRIBUTING.md"]
 
+#: What an example that never reaches Blender has to put in its own help text.
+NO_BACKEND_SENTENCE = b"This check never talks to Blender."
+
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -106,14 +109,24 @@ def test_the_panel_count_matches_the_code() -> None:
 
 def test_every_example_script_runs_its_help() -> None:
     """A script whose arguments have drifted from its documentation is worse
-    than no script, because it is what a broken report will be run from."""
+    than no script, because it is what a broken report will be run from.
+
+    A script that reaches Blender must say which backend it drives, so a report
+    can be reproduced. One that never does may skip the flag, but has to say so
+    in its help -- otherwise the exemption is silent, and the next script to
+    need a backend quietly inherits it.
+    """
     import subprocess
     import sys
 
     for script in sorted((ROOT / "examples").glob("*.py")):
         done = subprocess.run([sys.executable, str(script), "--help"], capture_output=True, timeout=120)
         assert done.returncode == 0, f"{script.name} --help failed: {done.stderr.decode()[:200]}"
-        assert b"--blender-mcp" in done.stdout, f"{script.name} does not take --blender-mcp"
+        needs_backend = b"--blender-mcp" in done.stdout
+        says_it_does_not = NO_BACKEND_SENTENCE in done.stdout
+        assert needs_backend or says_it_does_not, (
+            f"{script.name} neither takes --blender-mcp nor says '{NO_BACKEND_SENTENCE.decode()}'"
+        )
 
 
 def test_the_development_document_lists_the_commands_that_exist() -> None:

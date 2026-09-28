@@ -137,20 +137,45 @@ class OpenAICompatibleProvider(LLMProvider):
     async def chat(self, request: ChatRequest) -> ChatResponse:
         started = time.perf_counter()
         names = ToolNameMap([tool.name for tool in request.tools or []])
-        response = await self._post("/chat/completions", self._payload(request, stream=False, names=names))
+        response = await self._post_with_token_fallback(request, stream=False, names=names)
         payload = _json(response)
         parsed = _parse_completion(payload, request.model, names=names)
         parsed.latency_ms = (time.perf_counter() - started) * 1000
         return ensure_not_empty(parsed, self.name)
 
+    async def _post_with_token_fallback(
+        self, request: ChatRequest, *, stream: bool, names: ToolNameMap
+    ) -> Any:
+        """Send, and if the model refuses the parameter name, send it differently.
+
+        OpenAI's newer models reject ``max_tokens`` outright and name the
+        replacement in the error -- while every OpenAI-compatible server in
+        common use (Groq, OpenRouter, llama.cpp, vLLM) knows only
+        ``max_tokens``. Neither spelling works everywhere, and the model decides
+        which one it is, so the answer is asked rather than guessed: try, read
+        the refusal, and retry once.
+        """
+        response = await self._post(
+            "/chat/completions",
+            self._payload(request, stream=stream, names=names),
+            raise_for_status=False,
+        )
+        if response.status_code < 400:
+            return response
+        if request.max_tokens is None:
+            raise _error_for(self.name, response.status_code, response.content)
+        body = response.content or b""
+        if b"max_completion_tokens" not in body or b"max_tokens" not in body:
+            raise _error_for(self.name, response.status_code, body)
+        payload = self._payload(request, stream=stream, names=names)
+        payload.pop("max_tokens", None)
+        payload["max_completion_tokens"] = request.max_tokens
+        return await self._post("/chat/completions", payload)
+
     async def stream(self, request: ChatRequest) -> AsyncIterator[StreamChunk]:
         started = time.perf_counter()
         yield StreamChunk(type="start")
-        usage: Usage | None = None
-        finish = ""
         text: list[str] = []
-        calls: dict[int, ToolCall] = {}
-        collected: dict[int, str] = {}
         names = ToolNameMap([tool.name for tool in request.tools or []])
 
         try:
@@ -159,70 +184,29 @@ class OpenAICompatibleProvider(LLMProvider):
                 "/chat/completions",
                 json=self._payload(request, stream=True, names=names),
             ) as response:
-                if response.status_code >= 400:
+                if response.status_code < 400:
+                    async for piece in _read_stream(response, text, names):
+                        yield piece
+                else:
                     body = await response.aread()
-                    raise _error_for(self.name, response.status_code, body)
-
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    chunk = _json_line(data)
-                    if chunk is None:
-                        continue
-                    if chunk.get("usage"):
-                        usage = _usage_from_openai(chunk["usage"])
-                    for choice in chunk.get("choices") or []:
-                        finish = choice.get("finish_reason") or finish
-                        delta = choice.get("delta") or {}
-                        for piece in delta.get("content") or "":
-                            text.append(piece)
-                            yield StreamChunk(type="text", text=piece)
-                        for call in delta.get("tool_calls") or []:
-                            index = int(call.get("index", 0))
-                            call_id = call.get("id")
-                            function = call.get("function") or {}
-                            if call_id:
-                                calls[index] = ToolCall(
-                                    id=call_id, name=names.to_model(function.get("name", ""))
-                                )
-                                collected[index] = ""
-                                yield StreamChunk(
-                                    type="tool_start",
-                                    call_id=call_id,
-                                    name=names.to_model(function.get("name", "")),
-                                )
-                            arguments = function.get("arguments")
-                            if arguments:
-                                collected[index] = collected.get(index, "") + arguments
-                                yield StreamChunk(
-                                    type="tool_delta",
-                                    call_id=calls[index].id if index in calls else "",
-                                    name=calls[index].name if index in calls else "",
-                                    partial=arguments,
-                                )
-                    reasoning = _reasoning_from(chunk)
-                    if reasoning:
-                        yield StreamChunk(type="reasoning", text=reasoning)
+                    if request.max_tokens is None or b"max_completion_tokens" not in body:
+                        raise _error_for(self.name, response.status_code, body)
+                    # The same refusal the non-streaming path handles. Nothing was
+                    # received yet, so the stream is simply opened again with the
+                    # parameter this model asked for.
+                    retry = self._payload(request, stream=True, names=names)
+                    retry.pop("max_tokens", None)
+                    retry["max_completion_tokens"] = request.max_tokens
+                    async with self._http().stream("POST", "/chat/completions", json=retry) as second:
+                        if second.status_code >= 400:
+                            raise _error_for(self.name, second.status_code, await second.aread())
+                        async for piece in _read_stream(second, text, names):
+                            yield piece
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"{self.name} request failed: {exc}", provider=self.name, retryable=True
             ) from exc
 
-        for index, call in calls.items():
-            call.arguments = _parse_arguments(collected.get(index, ""))
-            yield StreamChunk(type="tool_end", call_id=call.id, name=call.name, arguments=call.arguments)
-
-        if usage is not None:
-            yield StreamChunk(type="usage", usage=usage)
-        yield StreamChunk(
-            type="end",
-            text="".join(text),
-            finish_reason=finish,
-            arguments=None,
-        )
         logger.debug("%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000)
 
     # --- pricing -----------------------------------------------------------
@@ -240,14 +224,16 @@ class OpenAICompatibleProvider(LLMProvider):
             )
         return usage
 
-    async def _post(self, path: str, payload: dict[str, Any]) -> httpx.Response:
+    async def _post(
+        self, path: str, payload: dict[str, Any], *, raise_for_status: bool = True
+    ) -> httpx.Response:
         try:
             response = await self._http().post(path, json=payload)
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"{self.name} request failed: {exc}", provider=self.name, retryable=True
             ) from exc
-        if response.status_code >= 400:
+        if raise_for_status and response.status_code >= 400:
             raise _error_for(self.name, response.status_code, response.content)
         return response
 
@@ -360,6 +346,63 @@ def _to_wire(message: Message, names: ToolNameMap | None = None) -> dict[str, An
         )
         return {"role": str(message.role), "content": content}
     return {"role": str(message.role), "content": text}
+
+
+async def _read_stream(response: Any, text: list[str], names: ToolNameMap) -> Any:
+    """Yield every chunk of one SSE stream, closing with usage and ``end``.
+
+    The first attempt and the retry both read through here, because a retry
+    that parses differently from the first try answers something else.
+    """
+    usage: Usage | None = None
+    finish = ""
+    calls: dict[int, ToolCall] = {}
+    collected: dict[int, str] = {}
+
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        chunk = _json_line(data)
+        if chunk is None:
+            continue
+        if chunk.get("usage"):
+            usage = _usage_from_openai(chunk["usage"])
+        for choice in chunk.get("choices") or []:
+            finish = choice.get("finish_reason") or finish
+            delta = choice.get("delta") or {}
+            for piece in delta.get("content") or "":
+                text.append(piece)
+                yield StreamChunk(type="text", text=piece)
+            for call in delta.get("tool_calls") or []:
+                index = int(call.get("index", 0))
+                call_id = call.get("id")
+                function = call.get("function") or {}
+                if call_id:
+                    calls[index] = ToolCall(id=call_id, name=names.to_model(function.get("name", "")))
+                    collected[index] = ""
+                    yield StreamChunk(type="tool_start", call_id=call_id, name=calls[index].name)
+                arguments = function.get("arguments")
+                if arguments:
+                    collected[index] = collected.get(index, "") + arguments
+                    yield StreamChunk(
+                        type="tool_delta",
+                        call_id=calls[index].id if index in calls else "",
+                        name=calls[index].name if index in calls else "",
+                        partial=arguments,
+                    )
+        reasoning = _reasoning_from(chunk)
+        if reasoning:
+            yield StreamChunk(type="reasoning", text=reasoning)
+
+    for index, call in calls.items():
+        call.arguments = _parse_arguments(collected.get(index, ""))
+        yield StreamChunk(type="tool_end", call_id=call.id, name=call.name, arguments=call.arguments)
+    if usage is not None:
+        yield StreamChunk(type="usage", usage=usage)
+    yield StreamChunk(type="end", text="".join(text), finish_reason=finish, arguments=None)
 
 
 def _parse_completion(

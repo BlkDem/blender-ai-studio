@@ -159,12 +159,90 @@ async def test_streaming_yields_text_then_the_finished_tool_call() -> None:
 
     text = "".join(c.text for c in received if c.type == "text")
     assert text == "Looking"
-    end = next(c for c in received if c.type == "tool_end")
+    ends = [c for c in received if c.type == "tool_end"]
+    assert len(ends) == 1, "the tool call is reported once, however many chunks carried it"
+    end = ends[0]
     assert end.name == "get_scene"
     assert end.arguments == {"object_limit": 5}
     usage = next(c for c in received if c.type == "usage")
     assert (usage.usage.input_tokens, usage.usage.output_tokens) == (7, 11)
     assert next(c for c in received if c.type == "end").finish_reason == "tool_calls"
+
+
+async def test_a_model_that_refuses_max_tokens_is_answered_in_its_own_words() -> None:
+    """OpenAI's newer models name the parameter they want; ask rather than guess.
+
+    Every OpenAI-compatible server in common use knows only ``max_tokens``, and
+    the model -- not the config -- decides which spelling it is. So the refusal
+    is read and answered once.
+    """
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        sent.append(payload)
+        if "max_tokens" in payload:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead."
+                    }
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ready"}}]})
+
+    response = await provider_with(handler).chat(ChatRequest(messages=[], model="gpt-5-mini", max_tokens=400))
+    assert response.text == "ready"
+    assert sent[0]["max_tokens"] == 400
+    assert "max_completion_tokens" not in sent[0]
+    assert sent[1]["max_completion_tokens"] == 400
+    assert "max_tokens" not in sent[1], "sending both is what the model refused in the first place"
+
+
+async def test_a_refusal_that_is_not_about_the_parameter_is_not_retried() -> None:
+    """A retry here would spend the same money twice and hide the real error."""
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(400, json={"error": {"message": "model not found"}})
+
+    with pytest.raises(ProviderError, match="model not found"):
+        await provider_with(handler).chat(ChatRequest(messages=[], model="m", max_tokens=8))
+    assert calls == 1
+
+
+async def test_streaming_retries_once_when_the_model_rejects_the_parameter() -> None:
+    """Streaming has to survive the same refusal, and report the tool once."""
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        sent.append(payload)
+        if "max_tokens" in payload:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "Use 'max_completion_tokens' instead of 'max_tokens'"}},
+            )
+        chunks = [
+            {"choices": [{"delta": {"content": "ok"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    received = [
+        chunk
+        async for chunk in provider_with(handler).stream(
+            ChatRequest(messages=[], model="gpt-5-mini", max_tokens=32)
+        )
+    ]
+    assert "".join(c.text for c in received if c.type == "text") == "ok"
+    assert next(c for c in received if c.type == "end").finish_reason == "stop"
+    assert sent[1]["max_completion_tokens"] == 32
+    assert "max_tokens" not in sent[1]
 
 
 async def test_streaming_asks_for_usage_so_the_cost_is_not_a_guess() -> None:
