@@ -93,6 +93,17 @@ Read the scene with blender.get_scene before you act on it, and confirm anything
 the earlier turns claimed before you rely on it.\
 """
 
+#: Appended to the system prompt when a run happens inside a project. The
+#: project is a workspace -- a file it is worked on and a history it is filed
+#: under -- and none of that is visible from a prompt, so a model asked to "make
+#: the table four legs" has no way to know it is mid-project, and a turn that
+#: re-derives what the last ten turns settled is the cost of not saying.
+PROJECT_NOTE = """\
+This turn is part of the project "{name}". Turns in a project are worked on in
+one file and kept together, so treat what earlier turns in it established as
+still true, and prefer continuing the work over restarting it.\
+"""
+
 
 def history_block(
     records: Sequence[Any],
@@ -212,6 +223,7 @@ class Agent:
         studio: Any = None,
         conversation_id: str = "",
         project_id: str | None = None,
+        project_name: str = "",
         allow_execute_python: bool = False,
         history: Sequence[Message] = (),
     ) -> None:
@@ -236,6 +248,10 @@ class Agent:
         self.studio = studio
         self.conversation_id = conversation_id
         self.project_id = project_id
+        #: The project's name, for the system prompt. The id is what the
+        #: database files a turn under; the name is the only part a model can
+        #: use, and it is empty when a run is not in a project.
+        self.project_name = project_name
         self.allow_execute_python = allow_execute_python
         self._runs: dict[str, asyncio.Task[Any]] = {}
         #: The conversation so far, without the system message. A new run is
@@ -303,6 +319,8 @@ class Agent:
         # there is, because it is paid once per step.
         if self._resumed:
             parts.append(RESUMED_NOTE)
+        if self.project_name:
+            parts.append(PROJECT_NOTE.format(name=self.project_name))
         return "\n\n".join(parts)
 
     # --- running -----------------------------------------------------------

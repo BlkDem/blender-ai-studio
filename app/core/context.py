@@ -120,6 +120,11 @@ class AppContext:
     #: The project the window is working in, or None for a session that is not
     #: in one. Every conversation, and every 3D task, is filed under it.
     current_project: str | None = None
+    #: That project's name, kept beside the id so the model can be told what it
+    #: is working on. The id alone reaches the system prompt as a bare string a
+    #: model cannot use, and asking the window for a name on every turn would be
+    #: a database read per step to learn something that changes rarely.
+    project_name: str = ""
 
     async def open(self) -> AppContext:
         """Migrate the database, load overrides and build the registries."""
@@ -138,7 +143,11 @@ class AppContext:
             self.three_d.provider()
         except ConfigurationError:
             logger.info("no 3D provider selected; the capability will not be offered")
-        self.tasks = TaskManager(self.bus, studio=self.studio)
+        # project_id is a callable, not a value: a project can be opened or
+        # closed while the window is up, and a task manager built with the
+        # project that happened to be open at start-up would file every later
+        # generation under it.
+        self.tasks = TaskManager(self.bus, studio=self.studio, project_id=lambda: self.current_project)
         return self
 
     async def close(self) -> None:
@@ -182,10 +191,16 @@ class AppContext:
         ``history`` seeds the agent's memory with an earlier session, so the
         first turn after reopening the window continues it. The agent keeps
         growing that memory itself from there.
+
+        ``project_id`` defaults to the open project. Passing ``""`` explicitly
+        means no project, which the old ``is not None`` default could not
+        express: a caller that wanted a run filed nowhere had no way to say so
+        while one was open.
         """
         assert self.llm is not None and self.mcp is not None, "open() first"
         provider, resolved_model = self.llm.resolve(provider_name, model)
         model_info = self.llm.find(provider_name, resolved_model)
+        chosen = project_id if project_id is not None else (self.current_project or "")
         return Agent(
             provider,
             resolved_model,
@@ -199,7 +214,8 @@ class AppContext:
             studio=self.studio,
             conversation_id=conversation_id,
             allow_execute_python=self.settings.agent.allow_execute_python,
-            project_id=project_id if project_id is not None else self.current_project,
+            project_id=chosen or None,
+            project_name=self.project_name if chosen else "",
             history=history,
         )
 
@@ -234,6 +250,27 @@ class AppContext:
         # and the failure should be about the directory, not its type.
         configured = str(self.settings.three_d.download_dir or "").strip()
         return Path(configured) if configured else self.settings.data_dir / "assets"
+
+    def projects_dir(self) -> Path:
+        """Where projects keep the files they are worked on.
+
+        ``default_project_dir`` has been in the settings since the beginning and
+        nothing has ever read it. A project's working file has to live somewhere
+        anyway, and a setting nobody sets is not a place to put it: Blender may
+        be on the other side of a filesystem, and the same reasoning as
+        :meth:`asset_dir` applies.
+        """
+        configured = self.settings.default_project_dir
+        return Path(configured) if configured else self.settings.data_dir / "projects"
+
+    def workspace_path(self, project: Any) -> Path:
+        """The file a project is worked on: its own copy of the starting .blend.
+
+        Keyed on the id rather than the name so a project can be renamed without
+        losing its file, and so a name with a slash or a colon in it is not a
+        path.
+        """
+        return self.projects_dir() / str(project.id) / "workspace.blend"
 
     async def _import_generated(self, task: Any, path: Path) -> Any:
         """Hand a finished model to Blender, when there is a way in."""

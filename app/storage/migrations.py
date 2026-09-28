@@ -175,6 +175,25 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        4,
+        "a project's own working file, and 3D tasks under their project",
+        [
+            # A project was a name on a conversation: it remembered where a run
+            # started from but never where the work had got to, so opening a
+            # project had to start over from the same .blend every time. The
+            # working file is that place, and it is a column rather than a
+            # computed path so a project can be pointed at a file the user
+            # already has.
+            "ALTER TABLE projects ADD COLUMN workspace TEXT",
+            # The panel, the README and AppContext's own comment all claimed 3D
+            # generations were filed under a project, and the table had no column
+            # to file them in. Either the claim or the schema was wrong; the
+            # schema was.
+            "ALTER TABLE three_d_tasks ADD COLUMN project_id TEXT",
+            "CREATE INDEX idx_three_d_tasks_project ON three_d_tasks(project_id, started_at)",
+        ],
+    ),
 ]
 
 LATEST_VERSION = max(version for version, _, _ in MIGRATIONS)

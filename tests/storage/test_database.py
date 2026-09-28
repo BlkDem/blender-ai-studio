@@ -41,6 +41,46 @@ async def test_foreign_keys_are_on(raw_database: Database) -> None:
     assert int(next(iter(row.values()))) == 1
 
 
+async def test_an_existing_install_gains_the_project_file_and_task_columns(
+    raw_database: Database,
+) -> None:
+    """The upgrade path, for a database that is already there.
+
+    Migrations are append-only, so a studio that has been run is at an earlier
+    version and the new columns arrive by ``ALTER TABLE``. A person who has been
+    using this has projects and 3D tasks already in there, and an upgrade that
+    rebuilt the table would take both away.
+    """
+    from app.storage import migrations
+
+    everything = migrations.MIGRATIONS
+    try:
+        migrations.MIGRATIONS = [entry for entry in everything if entry[0] <= 3]
+        assert await migrate(raw_database) == 3
+    finally:
+        migrations.MIGRATIONS = everything
+
+    await raw_database.run(
+        "INSERT INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        ("prj_old", "Already here", 1.0, 1.0),
+    )
+    await raw_database.run(
+        """INSERT INTO three_d_tasks (id, run_id, provider, kind, status, started_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("tdt_old", "run_1", "tripo", "text_to_3d", "succeeded", 1.0),
+    )
+
+    assert await migrate(raw_database) == LATEST_VERSION
+
+    projects = [row["name"] for row in await raw_database.all("PRAGMA table_info(projects)")]
+    assert "workspace" in projects
+    tasks = [row["name"] for row in await raw_database.all("PRAGMA table_info(three_d_tasks)")]
+    assert "project_id" in tasks
+    kept = await raw_database.one("SELECT name FROM projects WHERE id = ?", ("prj_old",))
+    assert kept is not None and kept["name"] == "Already here", "the old row is still there"
+    assert await raw_database.one("SELECT kind FROM three_d_tasks WHERE id = ?", ("tdt_old",))
+
+
 async def test_a_conversation_does_not_survive_its_project(studio: Studio) -> None:
     project = await studio.projects.create("Demo")
     conversation = await studio.conversations.create(project.id, "First")

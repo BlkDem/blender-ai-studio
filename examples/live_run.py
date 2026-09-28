@@ -287,9 +287,18 @@ async def check_projects(context: AppContext, options: argparse.Namespace) -> No
         f"Live check {options.name_suffix}", initial_blend=options.blend or None
     )
     context.current_project = project.id
+    # The name is what the model is told it is working on; setting only the id
+    # would leave the prompt saying nothing while the window's own path says the
+    # project is open.
+    context.project_name = project.name
     check("a project was created", project.id.startswith("prj_"), project.name)
 
     agent = context.agent(options.provider, options.model)
+    check(
+        "the model is told which project it is in",
+        project.name in agent.build_system_prompt(),
+        project.name,
+    )
     await agent.run("Tell me in one short sentence what you would model first for a medieval kitchen.")
     filed = await context.studio.conversations.list(project.id)
     check("the turn is filed under it", len(filed) == 1, [c.id for c in filed])
@@ -305,6 +314,7 @@ async def check_projects(context: AppContext, options: argparse.Namespace) -> No
         await context.studio.conversations.list(project.id) == [],
     )
     context.current_project = None
+    context.project_name = ""
 
 
 # --- 5. more than one MCP server --------------------------------------------

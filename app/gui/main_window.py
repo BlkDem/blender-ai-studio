@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,12 @@ PAGES = ("Chat", "Scene", "Tasks", "Projects", "Benchmark", "Models", "Settings"
 #: the studio rewrites is a file the user stops trusting, and one whose value the
 #: window has to agree with by hand.
 LAST_MODEL_KEY = "ui.last_model"
+
+#: The project that was open when the window closed, as a project id. Same
+#: reasoning as the model: a preference, not configuration, and the window
+#: reopening in no project while a project's transcript is on screen is a
+#: contradiction the user is in a poor position to explain.
+LAST_PROJECT_KEY = "ui.last_project"
 
 
 class MainWindow(QMainWindow):
@@ -160,8 +167,18 @@ class MainWindow(QMainWindow):
         self.mcp_status = QLabel("MCP: …")
         self.llm_status = QLabel("LLM: …")
         self.three_d_status = QLabel("3D: …")
+        self.project_status = QLabel("Project: none")
+        self.project_status.setObjectName("project-status")
+        #: Which project this is is not a fact the user should have to go and
+        #: check. The Projects page says it, and the Projects page is not where
+        #: the work happens -- so the status bar, which is on every page, says
+        #: it too. First in the bar, because it is the one that decides where the
+        #: next turn is filed.
+        self.project_status.setToolTip(
+            "Nothing is being filed. Open or create a project to keep this work together."
+        )
         self.cost_status = QLabel("")
-        for label in (self.mcp_status, self.llm_status, self.three_d_status):
+        for label in (self.project_status, self.mcp_status, self.llm_status, self.three_d_status):
             self.statusBar().addWidget(label)
         self.statusBar().addPermanentWidget(self.cost_status)
 
@@ -196,6 +213,7 @@ class MainWindow(QMainWindow):
         self.projects.closed.connect(self._close_project)
         self.projects.delete_requested.connect(self._delete_project)
         self.projects.blend_requested.connect(self._load_project_blend)
+        self.projects.rename_requested.connect(self._rename_project)
         self.models.select_first()
 
         quit_action = QAction("Quit", self)
@@ -215,11 +233,39 @@ class MainWindow(QMainWindow):
         self.core.submit(self.context.mcp.connect_all(), self._servers_connected)
         self.core.submit(self._load_models(), self._models_loaded)
         self.core.submit(self.tasks.load_stored(self.context.studio), self._tasks_loaded)
-        self.core.submit(self._restore_conversation(), lambda _n: None)
-        self.core.submit(self._load_projects(), lambda _p: None)
+        self.core.submit(self._read_last_project(), self._reopen_project)
         self.settings.load(self.context.settings)
         self._show_three_d_status()
         self._show_providers()
+
+    async def _read_last_project(self) -> Any:
+        """The project that was open last, if it is still there."""
+        if self.context.studio is None:
+            return None
+        wanted = str(await self.context.studio.settings.get(LAST_PROJECT_KEY) or "")
+        if not wanted:
+            return None
+        return await self.context.studio.projects.get(wanted)
+
+    def _reopen_project(self, project: Any) -> None:
+        """Put the window back in the project it was left in.
+
+        The project is restored before the conversation, and the order is the
+        whole point. The transcript used to be restored first, with nothing
+        knowing which project was open -- and ``list(None)`` means *every*
+        conversation, so the window came back showing another project's turns
+        while the panel said this session was filed nowhere, and the next turn
+        was written with a null project, splitting one project's history in two.
+        """
+        if project is None:
+            # No project: restore the newest conversation of any, which is what
+            # there is to restore. The next turn is not filed anywhere, and the
+            # panel says so rather than implying otherwise.
+            self._load_projects()
+            self._restore_conversation()
+            return
+        self._adopt_project(project)
+        self._restore_conversation()
 
     # --- prompt history ----------------------------------------------------
 
@@ -246,81 +292,265 @@ class MainWindow(QMainWindow):
         popup.chosen.connect(self.chat.put_prompt)
         popup.exec()
 
-    async def _load_projects(self) -> list[Any]:
+    # --- projects ----------------------------------------------------------
+    #
+    # Every one of these was an `async def` connected straight to a Qt signal,
+    # which is the one thing in this file that never worked: Qt calls the
+    # function, gets a coroutine back, and discards it. The body never ran, so
+    # Create did nothing at all -- and the tests missed it by calling the
+    # handlers directly instead of pressing the button. The split below is the
+    # shape the rest of the window already uses: a coroutine for the work, a
+    # callback for the widgets.
+
+    def _load_projects(self) -> None:
+        """Refill the panel. Reading is core-thread work; the widgets are ours."""
+        self.core.submit(self._fetch_projects(), self._show_projects)
+
+    async def _fetch_projects(self) -> list[Any]:
         if self.context.studio is None:
             return []
-        projects = await self.context.studio.projects.list()
+        return list(await self.context.studio.projects.list())
+
+    def _show_projects(self, projects: list[Any]) -> None:
         self.projects.show_projects(projects, self.context.current_project)
-        return projects
 
-    async def _create_project(self, name: str, blend: str) -> None:
+    def _create_project(self, name: str, blend: str) -> None:
+        # Read here, on the GUI thread, and pass it in: the model selector is a
+        # widget, and the coroutine below does not run here.
+        #
+        # currentData(), not current_model(): the project is looked up again by
+        # the selector when it is opened, and the selector's key is
+        # "provider:model". Storing the bare model id would make every project
+        # report its own model as unavailable, forever.
+        model = self.model_selector.currentData() or None
+        self.core.submit(self._do_create_project(name, blend, model), self._project_created)
+
+    async def _do_create_project(self, name: str, blend: str, model: str | None) -> Any:
         assert self.context.studio is not None
-        project = await self.context.studio.projects.create(
-            name, initial_blend=blend or None, default_model=self.current_model() or None
+        return await self.context.studio.projects.create(
+            name, initial_blend=blend or None, default_model=model
         )
-        self.context.current_project = project.id
-        self.projects.clear_inputs()
-        await self._load_projects()
-        self._new_conversation()
-        self.chat.add_note(f"Project '{project.name}' is open. Turns are filed under it.", role="system")
 
-    async def _open_project(self, project_id: str) -> None:
-        assert self.context.studio is not None
-        project = await self.context.studio.projects.get(project_id)
+    def _project_created(self, project: Any) -> None:
         if project is None:
+            self.chat.add_note("Could not create the project.", role="error")
             return
-        self.context.current_project = project.id
-        await self._load_projects()
-        await self._restore_conversation()
-        self.chat.add_note(
-            f"Project '{project.name}' is open"
-            + (f", starting from {project.initial_blend}" if project.initial_blend else "")
-            + ".",
-            role="system",
-        )
+        self.projects.clear_inputs()
+        self._adopt_project(project, created=True)
 
-    async def _close_project(self) -> None:
+    def _open_project(self, project_id: str) -> None:
+        self.core.submit(self._fetch_project(project_id), self._project_fetched)
+
+    async def _fetch_project(self, project_id: str) -> Any:
+        if self.context.studio is None:
+            return None
+        return await self.context.studio.projects.get(project_id)
+
+    def _project_fetched(self, project: Any, *, opening: bool = True) -> None:
+        if project is None:
+            self.chat.add_note("That project is not there any more.", role="error")
+            self._load_projects()
+            return
+        self._adopt_project(project)
+        if opening:
+            self._restore_conversation()
+
+    def _close_project(self) -> None:
         self.context.current_project = None
+        self.context.project_name = ""
+        self._remember_project(None)
         self._new_conversation()
-        await self._load_projects()
+        self._show_project_state()
+        self._load_projects()
         self.chat.add_note("Project closed. New turns are not filed anywhere.", role="system")
 
-    async def _delete_project(self, project_id: str) -> None:
+    def _delete_project(self, project_id: str) -> None:
+        self.core.submit(self._do_delete_project(project_id), self._project_deleted)
+
+    async def _do_delete_project(self, project_id: str) -> bool:
         assert self.context.studio is not None
         await self.context.studio.projects.delete(project_id)
-        if self.context.current_project == project_id:
+        return self.context.current_project == project_id
+
+    def _project_deleted(self, was_open: bool) -> None:
+        if was_open:
             self.context.current_project = None
+            self.context.project_name = ""
             self._new_conversation()
-        await self._load_projects()
+            self._show_project_state()
+        self._load_projects()
         self.chat.add_note("Project deleted, with the conversations filed under it.", role="system")
 
-    async def _load_project_blend(self, project_id: str, blend: str) -> None:
-        """Open a project's starting file in Blender, from a copy.
+    def _rename_project(self, project_id: str, name: str) -> None:
+        self.core.submit(self._do_rename_project(project_id, name), lambda _n: self._load_projects())
 
-        The original is never opened directly: Blender would then be editing the
-        file the project starts from, and the next run would not start where this
-        one did. The copy is what gets opened, and which of the three things
-        actually happened is reported rather than assumed.
+    async def _do_rename_project(self, project_id: str, name: str) -> None:
+        assert self.context.studio is not None
+        await self.context.studio.projects.update(project_id, name=name)
+        if project_id == self.context.current_project:
+            # The name is what the model is told it is working on, and what the
+            # status bar and the title show, so all three have to move together.
+            self.context.project_name = name
+            self._show_project_state()
+
+    def _load_project_blend(self, project_id: str, _blend: str) -> None:
+        """The panel's manual "open the file" button.
+
+        Opening a project already puts Blender on its file, so this is for the
+        times that is not enough: the file was closed, replaced, or deleted, and
+        the project still has a starting file to fall back on.
         """
-        assert self.context.studio is not None and self.context.mcp is not None
-        from app.benchmark.runner import RESET_COPY_ONLY, BenchmarkRunner, ModelSpec
+        self.core.submit(self._fetch_project(project_id), self._workspace_requested)
 
-        source = Path(blend)
-        if not source.exists():
-            self.chat.add_note(f"There is no such file: {blend}", role="error")
+    def _workspace_requested(self, project: Any) -> None:
+        if project is None:
+            self.chat.add_note("That project is not there any more.", role="error")
             return
-        workdir = self.context.asset_dir().parent / "scenes"
-        runner = BenchmarkRunner(self.context.llm, self.context.mcp, bus=self.context.bus, workdir=workdir)
-        staged = runner.stage_scene(source, ModelSpec(provider="", model="project"), 0)
+        self._open_workspace(project)
+
+    def _adopt_project(self, project: Any, *, created: bool = False) -> None:
+        """Make this the project the window is working in."""
+        self.context.current_project = project.id
+        self.context.project_name = project.name
+        self._show_project_state()
+        self._apply_project_model(project)
+        self._new_conversation()
+        self._remember_project(project.id)
+        self._load_projects()
+        detail = f" on {project.workspace}" if project.workspace else ""
+        if created:
+            # What to do next, not a statement of what just happened. Creating a
+            # project and being left staring at the Projects page, with nothing
+            # saying that the work happens somewhere else, is how a finished
+            # setup reads as a finished session.
+            self.chat.add_note(
+                f"Project '{project.name}' is open{detail} — it is shown at the bottom of the "
+                "window. Go to Chat and say what you want built; every turn from here is filed "
+                "under it.",
+                role="system",
+            )
+            if not self.current_provider():
+                self.chat.add_note(
+                    "No model is selected, so a turn would not go anywhere. Choose one in the "
+                    "selector at the top first.",
+                    role="error",
+                )
+        else:
+            self.chat.add_note(f"Project '{project.name}' is open{detail}.", role="system")
+        self._open_workspace(project)
+
+    def _show_project_state(self) -> None:
+        """Keep the status bar and the title in step with the open project.
+
+        Two places, one function: they answer the same question and a window that
+        says one thing in the title and another in the bar is worse than a
+        window that says nothing. The title is what the window manager shows
+        when several are open, and the bar is what is on screen when the Projects
+        page is not.
+        """
+        name = self.context.project_name if self.context.current_project else ""
+        self.project_status.setText(f"Project: {name}" if name else "Project: none")
+        self.project_status.setToolTip(
+            "Turns, 3D generations and tool calls are filed under it."
+            if name
+            else "Nothing is being filed. Open or create a project to keep this work together."
+        )
+        self.setWindowTitle(f"Blender AI Studio · {name}" if name else "Blender AI Studio")
+
+    def _apply_project_model(self, project: Any) -> None:
+        """Select the model the project was made with.
+
+        A project's model was written at creation, shown in the list, and never
+        applied to anything: opening a project that needs a different model ran
+        on whatever the last-used setting said. Said out loud when the model is
+        gone, because a project that quietly runs on another model looks like the
+        project is at fault.
+        """
+        wanted = str(project.default_model or "")
+        if not wanted or wanted == (self.model_selector.currentData() or ""):
+            return
+        if self._select_model(wanted):
+            # remember=False: the run has not happened yet, and a preference that
+            # records a project being opened would overwrite the user's own.
+            self._model_changed(remember=False)
+            return
+        self.chat.add_note(
+            f"Project '{project.name}' asks for {wanted.replace(':', ' · ')}, which is not "
+            f"available now; staying on {self.current_model() or 'nothing'}.",
+            role="error",
+        )
+
+    def _remember_project(self, project_id: str | None) -> None:
+        async def store() -> None:
+            if self.context.studio is None:
+                return
+            await self.context.studio.settings.set(LAST_PROJECT_KEY, project_id or "")
+
+        self.core.submit(store(), lambda _v: None)
+
+    def _open_workspace(self, project: Any) -> None:
+        """Put Blender on the project's own file, and report what actually happened.
+
+        The starting ``.blend`` is never opened directly: Blender would then be
+        editing the file the next run begins from. The first time, it is copied
+        once into the project's own directory; after that the copy *is* the
+        project, which is the point of having a workspace at all.
+        """
+        self.core.submit(self._stage_workspace(project), self._workspace_staged)
+
+    async def _stage_workspace(self, project: Any) -> tuple[str, str]:
+        """Copy the starting file once, then ask Blender to open the copy.
+
+        Returns (path, state), where state is one of the benchmark's three scene
+        outcomes. Which one is exactly the thing that must not be assumed: the
+        copy is made whether or not Blender can be told to open it, and a user
+        whose execute_python is off still gets a file to open by hand.
+        """
+        from app.benchmark.runner import RESET_UNVERIFIED, BenchmarkRunner
+
+        assert self.context.studio is not None and self.context.mcp is not None
+        # Path("") is Path("."), and "." always exists -- so an unset workspace
+        # would read as "the file is already there" and the project's working
+        # file would become the directory the studio happens to be running in.
+        # Same trap one line below for a project with no starting file.
+        recorded = str(project.workspace or "").strip()
+        existing = Path(recorded) if recorded else None
+        if existing is not None and existing.exists():
+            staged = existing
+        else:
+            source_text = str(project.initial_blend or "").strip()
+            if not source_text:
+                return "", RESET_UNVERIFIED
+            source = Path(source_text)
+            if not source.exists():
+                return str(source), RESET_UNVERIFIED
+            staged = self.context.workspace_path(project)
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, staged)
+            await self.context.studio.projects.update(project.id, workspace=str(staged))
+        runner = BenchmarkRunner(
+            self.context.llm, self.context.mcp, bus=self.context.bus, workdir=staged.parent
+        )
         state = await runner.reset_scene(staged)
+        return str(staged), state
+
+    def _workspace_staged(self, outcome: tuple[str, str]) -> None:
+        from app.benchmark.runner import RESET_COPY_ONLY, RESET_UNVERIFIED
+
+        path, state = outcome
+        if state == RESET_UNVERIFIED:
+            if path:
+                self.chat.add_note(f"There is no such file: {path}", role="error")
+            return
         if state == RESET_COPY_ONLY:
             self.chat.add_note(
-                f"Staged a copy at {staged} but Blender could not open it: "
-                "enable blender.execute_python in Settings, or open the file yourself.",
+                f"Staged a copy at {path} but Blender could not open it: enable "
+                "blender.execute_python in Settings, or open the file yourself.",
                 role="error",
             )
-        else:
-            self.chat.add_note(f"Blender is now on a copy of {source.name}: {staged}", role="system")
+            return
+        self.chat.add_note(f"Blender is on the project's own file: {path}", role="system")
+        self._load_projects()
 
     def _new_conversation(self) -> None:
         """Start a fresh conversation, in whatever project is now open."""
@@ -344,7 +574,7 @@ class MainWindow(QMainWindow):
         self.chat.clear()
         self.chat.add_note("New conversation. The last one is still on disk.")
 
-    async def _restore_conversation(self) -> int:
+    def _restore_conversation(self) -> None:
         """Put the last conversation back on screen *and* back in the model's head.
 
         Closing the window used to throw the transcript away even though every
@@ -356,17 +586,29 @@ class MainWindow(QMainWindow):
         has never heard of any of it, so "it forgot what I asked for" is a
         correct observation about a bug. The block handed to the model is capped
         and starts on a user turn -- see :func:`app.core.agent.history_block`.
+
+        The read and the drawing are split for the same reason the project
+        handlers are: this used to be one coroutine that rebuilt the transcript
+        from the core thread, which is the thread violation that stopped the
+        project panel doing anything at all.
         """
+        self.core.submit(self._fetch_last_conversation(), self._show_conversation)
+
+    async def _fetch_last_conversation(self) -> tuple[str, list[Any]]:
+        """The newest conversation of the open project, and its messages."""
         if self.context.studio is None:
-            return 0
+            return "", []
         conversations = await self.context.studio.conversations.list(self.context.current_project)
         if not conversations:
-            return 0
+            return "", []
         latest = conversations[0]
-        messages = await self.context.studio.messages.list(latest.id)
+        return latest.id, list(await self.context.studio.messages.list(latest.id))
+
+    def _show_conversation(self, found: tuple[str, list[Any]]) -> int:
+        conversation_id, messages = found
         if not messages:
             return 0
-        self._conversation_id = latest.id
+        self._conversation_id = conversation_id
         self._history = history_block(messages)
         self.chat.clear()
         for message in messages:

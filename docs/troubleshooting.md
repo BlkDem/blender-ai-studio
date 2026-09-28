@@ -63,9 +63,9 @@ The window still shows the render in the tool card either way.
 
 **The context fills up after a few turns.**
 
-A conversation is replayed every turn, so a long one grows. Start a new project,
-or close the project, to begin a fresh conversation. The cost of the replay is
-visible in the footer's token count.
+A conversation is replayed every turn, so a long one grows. Press **New** for a
+blank conversation in the same project, or close the project to step out of it
+entirely. The cost of the replay is visible in the footer's token count.
 
 **This model models/gemini-2.5-flash is no longer available to new users.**
 

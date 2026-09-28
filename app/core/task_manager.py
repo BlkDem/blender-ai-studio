@@ -90,6 +90,7 @@ class TaskManager:
         *,
         keep: int = 200,
         studio: Any = None,
+        project_id: Callable[[], str | None] | None = None,
     ) -> None:
         self._bus = bus or EventBus()
         self._tasks: dict[str, Task] = {}
@@ -101,6 +102,11 @@ class TaskManager:
         #: database -- but a 3D generation that costs money must not be
         #: something that only exists until the window closes.
         self._studio = studio
+        #: The project open when a task *starts*, asked of a callable rather than
+        #: copied once: a project can be opened or closed between two tasks, and
+        #: a value read at construction would file everything under whichever one
+        #: happened to be open when the window started.
+        self._project_id = project_id
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -256,6 +262,7 @@ class TaskManager:
             local_path=(task.result or {}).get("path") if isinstance(task.result, dict) else None,
             error=task.error or None,
             finished_at=task.finished_at,
+            project_id=self._project_id() if self._project_id else None,
         )
         try:
             if existing:

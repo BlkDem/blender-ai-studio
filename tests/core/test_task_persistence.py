@@ -62,6 +62,39 @@ async def test_a_finished_3d_task_is_in_the_database(studio: Studio) -> None:
     assert row.finished_at is not None
 
 
+async def test_a_3d_task_is_filed_under_the_project_that_asked_for_it(studio: Studio) -> None:
+    """The panel, the README and AppContext's own comment all said 3D
+    generations were filed under a project, and the table had no column to file
+    them in. A generation that costs money should be findable next to the work
+    that caused it."""
+    project = await studio.projects.create("Kitchen")
+    open_project = project.id
+    tasks = TaskManager(EventBus(), studio=studio, project_id=lambda: open_project)
+
+    async def work(task):
+        return {"path": "/tmp/a.glb", "url": "https://example/a.glb"}
+
+    task = await tasks.start(
+        "3D: a chest", work, provider="tripo", run_id="run_1",
+        payload={"prompt": "a chest", "kind": "text_to_3d"},
+    )
+    await tasks.wait(task.id, timeout=5)
+
+    filed = await studio.three_d.list(project_id=project.id)
+    assert [r.id for r in filed] == [f"tdt_{task.id}"], "the generation is under the project"
+    assert await studio.three_d.list() == filed, "and still in the unfiltered list"
+
+    # Closing the project mid-session must not retroactively re-file it.
+    open_project = None
+    later = await tasks.start(
+        "3D: a lamp", work, provider="tripo", run_id="run_2",
+        payload={"prompt": "a lamp", "kind": "text_to_3d"},
+    )
+    await tasks.wait(later.id, timeout=5)
+    assert [r.id for r in await studio.three_d.list(project_id=project.id)] == [f"tdt_{task.id}"]
+    assert next(r for r in await studio.three_d.list() if r.id == f"tdt_{later.id}").project_id is None
+
+
 async def test_a_failed_3d_task_records_why(studio: Studio) -> None:
     tasks = TaskManager(EventBus(), studio=studio)
 

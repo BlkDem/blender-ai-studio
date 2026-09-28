@@ -34,6 +34,10 @@ class Project:
     blender_mcp: str | None = None
     initial_blend: str | None = None
     default_model: str | None = None
+    #: The file this project is actually worked on in, a copy of ``initial_blend``
+    #: made the first time the project was opened. Null until then, and for a
+    #: project with no starting file at all.
+    workspace: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -106,6 +110,10 @@ class ThreeDTaskRecord:
     local_path: str | None = None
     error: str | None = None
     finished_at: float | None = None
+    #: The project this generation was asked for in, or None for work that is
+    #: not filed anywhere. Read back per project, so it is the id the window had
+    #: open when the task started, not whatever is open when it finishes.
+    project_id: str | None = None
 
 
 # --- repositories -----------------------------------------------------------
@@ -122,6 +130,7 @@ class ProjectRepository:
         blender_mcp: str | None = None,
         initial_blend: str | None = None,
         default_model: str | None = None,
+        workspace: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Project:
         now = time.time()
@@ -133,12 +142,14 @@ class ProjectRepository:
             blender_mcp=blender_mcp,
             initial_blend=initial_blend,
             default_model=default_model,
+            workspace=workspace,
             metadata=metadata or {},
         )
         await self._db.run(
             """INSERT INTO projects
-               (id, name, created_at, updated_at, blender_mcp, initial_blend, default_model, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, name, created_at, updated_at, blender_mcp, initial_blend, default_model,
+                workspace, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 project.id,
                 project.name,
@@ -147,6 +158,7 @@ class ProjectRepository:
                 project.blender_mcp,
                 project.initial_blend,
                 project.default_model,
+                project.workspace,
                 json_dumps(project.metadata),
             ),
         )
@@ -163,7 +175,7 @@ class ProjectRepository:
     async def update(self, project_id: str, **fields: Any) -> None:
         if not fields:
             return
-        allowed = {"name", "blender_mcp", "initial_blend", "default_model"}
+        allowed = {"name", "blender_mcp", "initial_blend", "default_model", "workspace"}
         assignments, values = [], []
         for key, value in fields.items():
             if key in allowed:
@@ -189,6 +201,7 @@ def _to_project(row: Row) -> Project:
         blender_mcp=row.get("blender_mcp"),
         initial_blend=row.get("initial_blend"),
         default_model=row.get("default_model"),
+        workspace=row.get("workspace"),
         metadata=json_loads(row.get("metadata"), {}) or {},
     )
 
@@ -457,8 +470,9 @@ class ThreeDTaskRepository:
         await self._db.run(
             """INSERT INTO three_d_tasks
                (id, run_id, provider, provider_task_id, kind, prompt, model, status, progress,
-                credits, cost_usd, result_url, local_path, error, started_at, finished_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                credits, cost_usd, result_url, local_path, error, started_at, finished_at,
+                project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 record.id,
                 record.run_id,
@@ -476,6 +490,7 @@ class ThreeDTaskRepository:
                 record.error,
                 record.started_at,
                 record.finished_at,
+                record.project_id,
             ),
         )
 
@@ -506,11 +521,26 @@ class ThreeDTaskRepository:
         values.append(task_id)
         await self._db.run(f"UPDATE three_d_tasks SET {', '.join(assignments)} WHERE id = ?", values)
 
-    async def list(self, run_id: str | None = None, limit: int = 100) -> list[ThreeDTaskRecord]:
-        if run_id:
+    async def list(
+        self, run_id: str | None = None, limit: int = 100, project_id: str | None = None
+    ) -> list[ThreeDTaskRecord]:
+        if run_id and project_id:
+            rows = await self._db.all(
+                """SELECT * FROM three_d_tasks
+                   WHERE run_id = ? AND project_id = ?
+                   ORDER BY started_at DESC LIMIT ?""",
+                (run_id, project_id, limit),
+            )
+        elif run_id:
             rows = await self._db.all(
                 "SELECT * FROM three_d_tasks WHERE run_id = ? ORDER BY started_at DESC LIMIT ?",
                 (run_id, limit),
+            )
+        elif project_id:
+            rows = await self._db.all(
+                """SELECT * FROM three_d_tasks
+                   WHERE project_id = ? ORDER BY started_at DESC LIMIT ?""",
+                (project_id, limit),
             )
         else:
             rows = await self._db.all(
@@ -534,6 +564,7 @@ class ThreeDTaskRepository:
                 error=row["error"],
                 started_at=row["started_at"],
                 finished_at=row["finished_at"],
+                project_id=row["project_id"],
             )
             for row in rows
         ]

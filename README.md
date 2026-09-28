@@ -249,7 +249,7 @@ app/
 | **Chat** | The conversation, streamed, with a card per tool call: arguments, duration, success, images. Stop any time. |
 | **Scene** | What Blender is showing — connection, scene, object count, active object, camera, engine, frame — read over MCP like everything else. |
 | **Tasks** | Background work: provider, status, progress, duration, credits, cost. Cancel from here, and it is restored from the database on the next launch. |
-| **Projects** | Named pieces of work with a starting `.blend`. Turns are filed under the open one, and opening it brings the transcript back. |
+| **Projects** | Workspaces. Opening one gives you its file, its model and its transcript, and everything after that is filed under it. |
 | **Benchmark** | Build a suite, run it, read the table, score the results yourself. |
 | **Models** | Providers, keys, capabilities, and the model selector's contents. |
 | **Settings** | Blender's server, the agent's limits, and the budgets. |
@@ -380,12 +380,26 @@ is a different request.
 
 ## Projects
 
-A project is a named piece of work with a starting `.blend`, and every turn,
-generation and review belongs to one. Opening a project brings its transcript
-back; closing it stops filing; deleting it takes its conversations with it. A
-project's file is opened in Blender **from a copy** — the file a project starts
-from is never the file being edited, or the next run would not start where the
-last one did.
+A project is a workspace, not a label. It is a named piece of work with three
+things attached: the file the work happens in, the model it is done with, and the
+conversation it is carried on in. Opening a project gives you all three, and every
+turn, tool call and 3D generation after that is filed under it.
+
+The file is the project's own copy, made once from the starting `.blend` and then
+left alone. The starting file is never opened directly and never modified —
+Blender would then be editing the file the next run begins from — and the copy is
+not re-made on every open either, or a project would be no better than re-reading
+its beginning every time. Coming back tomorrow finds today's work where it was.
+
+A project you were in is the project you get: the window reopens in it, with its
+model and its transcript, rather than showing one project's turns while the panel
+says this session is filed nowhere. The model is told the project's name, so it
+treats what earlier turns in it established as still true instead of re-deriving
+it. Closing a project steps out of all of it; deleting one asks first, because the
+conversations under it go with it and cannot be brought back.
+
+Projects live under `STUDIO_DEFAULT_PROJECT_DIR`, and their working files under
+`data/projects/` when that is unset.
 
 ## Benchmark
 
@@ -542,7 +556,7 @@ and therefore what makes tool calling work.
 | Agent | the loop, budgets, cancellation, persistence, local tools, the `execute_python` gate |
 | 3D | request construction, envelope unwrapping, status mapping, polling, download, import, credits |
 | Tasks | stored as they start and as they settle, restored by the panel, one row per task |
-| Projects | listing, filing turns under one, reopening the transcript, cascade on delete |
+| Projects | the Create button actually creating, a project's own file surviving a reopen, its model, what the model is told, filing turns and 3D tasks, rename, cascade on delete |
 | Benchmark | isolation, metrics, storage, the absence of a verdict, the headless command |
 | Storage | migrations, foreign keys, concurrency, secrets |
 | GUI | panels, the transcript, a render in a tool card, and full runs through the window, offscreen |
@@ -575,7 +589,8 @@ python examples/live_run.py \
 - [x] Memory: a turn carries the ones before it, and a reopened window resumes
 - [x] Prompt history: a popup, and Ctrl+Up, read back from the stored prompts
 - [x] Last used model is remembered, and a missing one is reported rather than swapped
-- [x] Projects: named work with a starting `.blend`, and turns filed under it
+- [x] Projects: a workspace — its own file, its model, its conversation, and
+  turns, generations and tool calls filed under it
 - [x] Tasks that outlive the window: stored, and restored on the next launch
 - [x] Multiple MCP servers, editable by name in the window
 - [ ] `blender.import_asset`, so a generated asset lands in the scene without
@@ -583,7 +598,10 @@ python examples/live_run.py \
 - [ ] Say "you already asked for that" when a model repeats a tool call with the
   same arguments, instead of counting to the step limit and stopping there
 - [ ] More 3D providers behind the same interface
-- [ ] Project files: a project remembers its scene, but does not yet save one
+- [ ] Project files: the project keeps its working file, but nothing writes the
+  live scene back to it yet, so work is only kept as long as the file survives
+- [ ] Per-project MCP server and metadata, both of which the schema has carried
+  since the first migration and nothing has ever written
 
 ## Licence
 

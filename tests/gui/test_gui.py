@@ -970,8 +970,15 @@ async def test_reopening_the_window_puts_the_transcript_back(window, qapp) -> No
 
     window.chat.clear()
     assert window.chat.transcript_text() == ""
-    restored = await window._restore_conversation()  # noqa: SLF001
-    assert restored >= 2
+    # Through the window's own path, not the coroutine: rebuilding the
+    # transcript is a widget operation, and the window has to be the thread
+    # that does it.
+    window._restore_conversation()  # noqa: SLF001
+    for _ in range(200):
+        qapp.processEvents()
+        await asyncio.sleep(0.01)
+        if "Remembered." in window.chat.transcript_text():
+            break
     text = window.chat.transcript_text()
     assert "what is in the scene?" in text
     assert "Remembered." in text, "and the window carries on where it left off"

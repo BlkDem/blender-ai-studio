@@ -96,10 +96,10 @@ check that passes while the app is broken.
 
 ### 5. The database is not optional, and neither is it the truth
 
-Everything the studio does is recorded: conversations, messages, tool calls, LLM
-requests, 3D tasks, settings, benchmark runs and reviews. The Tasks panel, the
-cost figures and the benchmark table are all views of what was stored, so a
-number in the window and a number in the database come from the same place.
+Everything the studio does is recorded: projects, conversations, messages, tool
+calls, LLM requests, 3D tasks, settings, benchmark runs and reviews. The Tasks
+panel, the cost figures and the benchmark table are all views of what was stored,
+so a number in the window and a number in the database come from the same place.
 
 The one deliberate exception: the studio is not the source of truth for Blender.
 `blender-mcp` is, and the studio asks it.
