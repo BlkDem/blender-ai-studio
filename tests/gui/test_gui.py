@@ -391,7 +391,8 @@ async def test_a_key_can_be_given_to_a_provider_without_being_redefined(window, 
 
     before = window.context.llm.config("scripted")
     assert before is not None
-    window.models.existing_provider.setCurrentText("scripted")
+    window.models.providers_table.selectRow(0)
+    assert window.models._selected_provider() == "scripted", "the row is the target"
     window.models.existing_key.setText("sk-test")
     window.models.save_existing_key.click()
     for _ in range(40):
@@ -422,24 +423,31 @@ async def test_a_key_for_a_provider_that_does_not_exist_is_refused(window, qapp)
     assert "nonesuch" in window.chat.transcript_text()
 
 
-def test_the_models_panel_offers_a_key_for_each_configured_provider(qapp) -> None:
+def test_the_key_button_saves_for_the_selected_row_and_nowhere_else(qapp) -> None:
     panel = ModelsPanel(secrets_backend="file")
     panel.show_providers(
         [{"name": "gemini", "kind": "gemini"}, {"name": "groq", "kind": "openai-compatible"}]
     )
-    names = [panel.existing_provider.itemText(i) for i in range(panel.existing_provider.count())]
-    assert names == ["gemini", "groq"]
     assert panel.existing_key.echoMode().name == "Password", "a key is never shown in the clear"
+    assert panel.save_existing_key.isEnabled() is False, "nothing to save for until a row is chosen"
 
     seen: list[tuple[str, str]] = []
     panel.set_api_key.connect(lambda provider, key: seen.append((provider, key)))
-    panel.existing_provider.setCurrentText("gemini")
+
+    panel.providers_table.selectRow(1)
+    assert panel.key_target.text() == "groq", "the window says where the key will go"
     panel.existing_key.setText("sk-abc")
     panel.save_existing_key.click()
-    assert seen == [("gemini", "sk-abc")]
+    assert seen == [("groq", "sk-abc")]
+
+    panel.existing_key.setText("sk-second")
+    panel.providers_table.selectRow(0)
+    assert panel.existing_key.text() == "", "the old key is not carried to another provider"
+    panel.providers_table.selectRow(1)
+    assert panel.existing_key.text() == ""
 
     panel.clear_existing_key.click()
-    assert seen[-1] == ("gemini", ""), "an empty key clears it, which is the only way to"
+    assert seen[-1] == ("groq", ""), "an empty key clears it, which is the only way to"
 
 
 async def test_the_window_runs_a_turn_and_shows_every_step(window, qapp) -> None:

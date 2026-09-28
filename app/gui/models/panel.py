@@ -12,7 +12,7 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
+    QAbstractItemView,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -75,28 +75,35 @@ class ModelsPanel(QWidget):
         self.providers_table.setObjectName("providers-table")
         self.providers_table.setHorizontalHeaderLabels(PROVIDER_COLUMNS)
         self.providers_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.providers_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.providers_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.providers_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.providers_table.itemSelectionChanged.connect(self._provider_row_selected)
         layout.addWidget(self.providers_table)
 
         # A key for a provider that is already configured. "Add provider" is the
         # other way to set one, and it replaces the whole configuration -- the
         # model list, the default model -- with a placeholder. So adding a key
         # used to mean risking the provider it was meant to enable.
-        existing = QGroupBox("Key for a configured provider")
+        #
+        # The provider is whichever row is selected in the table above, so the
+        # key lands on the row the window is pointing at and needs no second
+        # list of names to keep in step with the first.
+        existing = QGroupBox("API key for the selected provider")
         existing_form = QFormLayout(existing)
-        self.existing_provider = QComboBox()
+        self.key_target = QLabel("Select a provider in the table above.")
         self.existing_key = QLineEdit()
         self.existing_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.save_existing_key = QPushButton("Set key")
+        self.existing_key.setPlaceholderText("paste the key, then Save")
+        self.save_existing_key = QPushButton("Save key")
+        self.save_existing_key.setEnabled(False)
         self.save_existing_key.clicked.connect(
-            lambda: self.set_api_key.emit(
-                self.existing_provider.currentText().strip(), self.existing_key.text()
-            )
+            lambda: self.set_api_key.emit(self._selected_provider(), self.existing_key.text())
         )
         self.clear_existing_key = QPushButton("Clear key")
-        self.clear_existing_key.clicked.connect(
-            lambda: self.set_api_key.emit(self.existing_provider.currentText().strip(), "")
-        )
-        existing_form.addRow("Provider", self.existing_provider)
+        self.clear_existing_key.setEnabled(False)
+        self.clear_existing_key.clicked.connect(lambda: self.set_api_key.emit(self._selected_provider(), ""))
+        existing_form.addRow("Saving for", self.key_target)
         existing_form.addRow("API key", self.existing_key)
         buttons = QHBoxLayout()
         buttons.addWidget(self.save_existing_key)
@@ -137,14 +144,27 @@ class ModelsPanel(QWidget):
 
     # --- data --------------------------------------------------------------
 
+    def _selected_provider(self) -> str:
+        rows = self.providers_table.selectionModel().selectedRows()
+        if not rows:
+            return ""
+        item = self.providers_table.item(rows[0].row(), 0)
+        return item.text().strip() if item else ""
+
+    def _provider_row_selected(self) -> None:
+        """Name the provider the key will go to, before it goes there.
+
+        A key saved against the wrong provider is a secret in the wrong place,
+        and the field is empty on every selection so an old key cannot be
+        re-saved over a new one.
+        """
+        name = self._selected_provider()
+        self.existing_key.clear()
+        self.key_target.setText(name or "Select a provider in the table above.")
+        self.save_existing_key.setEnabled(bool(name))
+        self.clear_existing_key.setEnabled(bool(name))
+
     def show_providers(self, providers: list[dict[str, Any]]) -> None:
-        chosen = self.existing_provider.currentText()
-        self.existing_provider.clear()
-        self.existing_provider.addItems(
-            [str(entry.get("name", "")) for entry in providers if entry.get("name")]
-        )
-        if chosen in [self.existing_provider.itemText(i) for i in range(self.existing_provider.count())]:
-            self.existing_provider.setCurrentText(chosen)
         self.providers_table.setRowCount(len(providers))
         for row, entry in enumerate(providers):
             values = [
