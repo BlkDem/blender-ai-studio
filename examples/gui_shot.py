@@ -61,6 +61,25 @@ def settings_for(options: argparse.Namespace) -> Settings:
             ],
         )
     ]
+    if options.second_provider:
+        # A second provider, so the table the window fills has more than one row.
+        name, _, model = options.second_provider.partition(":")
+        settings.llm_providers = list(settings.llm_providers) + [
+            ProviderConfig(
+                name=name,
+                kind="openai-compatible",
+                base_url=options.second_base_url,
+                default_model=model,
+                models=[
+                    {
+                        "id": model,
+                        "supports_tools": True,
+                        "supports_vision": options.model_sees_images,
+                        "context_window": 8192,
+                    }
+                ],
+            )
+        ]
     return settings
 
 
@@ -115,7 +134,7 @@ async def run(options: argparse.Namespace) -> int:
 
     # One shot of each page the run touched, so the panels are seen doing their
     # job rather than described.
-    for index, name in enumerate(("Chat", "Scene", "Tasks", "Projects", "Benchmark")):
+    for index, name in enumerate(("Chat", "Scene", "Tasks", "Projects", "Benchmark", "Models", "Settings")):
         window.pages.setCurrentIndex(index)
         pump(0.3)
         page = shot.with_name(f"{shot.stem}-{name.lower()}{shot.suffix}")
@@ -149,6 +168,9 @@ def main() -> int:
     )
     parser.add_argument("--out", type=Path, default=Path("out/studio-shot.png"))
     parser.add_argument("--data-dir", type=Path, default=Path("out/data"))
+    parser.add_argument("--model-sees-images", action="store_true", help="declare the model multimodal")
+    parser.add_argument("--second-provider", default="", help="name:model, to fill the providers table")
+    parser.add_argument("--second-base-url", default="")
     return asyncio.run(run(parser.parse_args()))
 
 
