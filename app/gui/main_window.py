@@ -191,6 +191,7 @@ class MainWindow(QMainWindow):
         self.core.submit(self._load_projects(), lambda _p: None)
         self.settings.load(self.context.settings)
         self._show_three_d_status()
+        self._show_providers()
 
     # --- projects ----------------------------------------------------------
 
@@ -319,6 +320,34 @@ class MainWindow(QMainWindow):
     async def _load_models(self) -> list[dict[str, Any]]:
         assert self.context.llm is not None
         return [model.to_dict() for model in self.context.llm.models()]
+
+    def _show_providers(self) -> None:
+        """Fill the providers table.
+
+        The method existed and nothing called it, so the table stayed empty: a
+        panel with a heading, six columns and no rows, which reads as "no
+        providers" even when three are configured.
+        """
+        if self.context.llm is None:
+            return
+        entries = []
+        for config in self.context.llm.configs():
+            key = ""
+            if self.context.secrets is not None:
+                from app.storage.secrets import key_name
+
+                key = self.context.secrets.masked(key_name(config.name))
+            entries.append(
+                {
+                    "name": config.name,
+                    "kind": config.kind,
+                    "base_url": config.base_url,
+                    "key": key,
+                    "models": config.models,
+                    "ready": self.context.llm.is_configured(config.name),
+                }
+            )
+        self.models.show_providers(entries)
 
     def _models_loaded(self, models: list[dict[str, Any]]) -> None:
         self.models.show_models(models)

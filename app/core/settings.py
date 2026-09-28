@@ -9,6 +9,7 @@ project export can never contain one.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -16,21 +17,28 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: What a value that will not parse becomes, so the caller can drop it. Pydantic
+#: does not validate on assignment here, so without this a bad value from the
+#: database is stored verbatim and breaks something much later -- a limit
+#: compared as a string, an integer that will not iterate.
+_INVALID = object()
+
 
 def _coerce(annotation: Any, value: Any) -> Any:
-    """Validate one value against one annotation.
+    """Validate one value against one annotation, or say that it will not parse.
 
     A union of models, or a bare ``list``, is what pydantic's TypeAdapter handles
-    best; anything it cannot make sense of is returned unchanged and rejected by
-    the field's own validation instead.
+    best.
     """
     if annotation is None:
         return value
     try:
         return TypeAdapter(annotation).validate_python(value)
     except Exception:
-        return value
+        return _INVALID
 
+
+logger = logging.getLogger(__name__)
 
 #: XDG-ish default. One file to delete, one path to document.
 DEFAULT_DATA_DIR = Path(
@@ -120,7 +128,15 @@ class Settings(BaseSettings):
     """Everything that is not a secret."""
 
     model_config = SettingsConfigDict(
-        env_prefix="STUDIO_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_prefix="STUDIO_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # STUDIO_AGENT__MAX_STEPS, which is what .env.example documents. Without
+        # the delimiter a nested field is settable only as JSON, and the
+        # documented form silently does nothing -- the worst kind of
+        # configuration, because it looks like it worked.
+        env_nested_delimiter="__",
     )
 
     data_dir: Path = DEFAULT_DATA_DIR
@@ -164,10 +180,14 @@ class Settings(BaseSettings):
                 continue
             field = type(owner).model_fields.get(attribute) if isinstance(owner, BaseModel) else None
             annotation = field.annotation if field is not None else None
-            try:
-                setattr(owner, attribute, _coerce(annotation, value))
-            except (TypeError, ValueError):
+            coerced = _coerce(annotation, value)
+            if coerced is _INVALID:
+                logger.warning("ignoring the stored setting %s=%r: not a %s", path, value, annotation)
                 continue
+            try:
+                setattr(owner, attribute, coerced)
+            except (TypeError, ValueError) as exc:
+                logger.warning("ignoring the stored setting %s=%r: %s", path, value, exc)
 
     def _resolve(self, path: str) -> tuple[Any, str]:
         """Follow a dotted path to the object that owns the last segment."""

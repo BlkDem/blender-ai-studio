@@ -22,20 +22,20 @@ you:          watch the tool cards appear, and the viewport change
 
 ## Contents
 
-1. [Install](#install)
-2. [Connect Blender](#connect-blender)
-3. [Connect a model](#connect-a-model)
-4. [Your first task](#your-first-task)
-5. [What it looks like](#what-it-looks-like)
-6. [Architecture](#architecture)
-7. [The panels](#the-panels)
-8. [3D generation](#3d-generation)
-9. [Benchmark](#benchmark)
-10. [Costs and limits](#costs-and-limits)
-11. [Configuration](#configuration)
-12. [Development](#development)
-13. [Testing](#testing)
-14. [Roadmap](#roadmap)
+**Start here:** this page. Then, depending on why you are here:
+
+| | |
+|---|---|
+| [Install](#install) · [Connect Blender](#connect-blender) · [Connect a model](#connect-a-model) | getting it running |
+| [Your first task](#your-first-task) · [What it looks like](#what-it-looks-like) | using it |
+| [The panels](#the-panels) · [3D generation](#3d-generation) · [The vision loop](#the-vision-loop) · [Projects](#projects) · [Benchmark](#benchmark) | what each part does |
+| [Costs and limits](#costs-and-limits) · [Configuration](#configuration) | tuning it |
+| [Testing](#testing) · [Development](#development) · [Roadmap](#roadmap) | working on it |
+| [docs/architecture.md](docs/architecture.md) | how it fits together, and why |
+| [docs/providers.md](docs/providers.md) | adding a model provider, a 3D provider, a tool |
+| [docs/development.md](docs/development.md) | the daily loop, and the shape of a change |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | the failures that actually happen |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | before you open a pull request |
 
 ## Install
 
@@ -129,7 +129,7 @@ To do the same without a window:
 
 ## What it looks like
 
-Six panels on the left, a transcript on the right, and a status line that always
+Seven pages on the left, a transcript on the right, and a status line that always
 answers three questions: is Blender attached, is the model ready, is 3D ready.
 
 ```text
@@ -212,7 +212,8 @@ app/
 |---|---|
 | **Chat** | The conversation, streamed, with a card per tool call: arguments, duration, success, images. Stop any time. |
 | **Scene** | What Blender is showing — connection, scene, object count, active object, camera, engine, frame — read over MCP like everything else. |
-| **Tasks** | Background work: provider, status, progress, duration, credits, cost. Cancel from here. |
+| **Tasks** | Background work: provider, status, progress, duration, credits, cost. Cancel from here, and it is restored from the database on the next launch. |
+| **Projects** | Named pieces of work with a starting `.blend`. Turns are filed under the open one, and opening it brings the transcript back. |
 | **Benchmark** | Build a suite, run it, read the table, score the results yourself. |
 | **Models** | Providers, keys, capabilities, and the model selector's contents. |
 | **Settings** | Blender's server, the agent's limits, and the budgets. |
