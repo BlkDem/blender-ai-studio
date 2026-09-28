@@ -431,12 +431,16 @@ async def amain(options: argparse.Namespace) -> int:
     except StudioError as exc:
         print(f"{exc.code}: {exc.user_text()}", file=sys.stderr)
         return EXIT_FAILED
+    else:
+        # The window runs *inside* the try, so the context is still open while it
+        # is up. Running it after the finally block handed it a closed database
+        # and a torn-down MCP manager: the window looked fine and every write --
+        # conversations, tool calls, usage, generated tasks -- failed quietly.
+        from app.gui.main import run_gui
+
+        return run_gui(context)
     finally:
         await context.close()
-
-    from app.gui.main import run_gui
-
-    return run_gui(context)
 
 
 def main(argv: list[str] | None = None) -> int:
