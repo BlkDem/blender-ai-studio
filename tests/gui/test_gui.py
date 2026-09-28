@@ -16,6 +16,7 @@ import asyncio
 import base64
 import os
 import time
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -673,3 +674,34 @@ def test_a_tool_card_shows_the_picture_it_returned(qapp) -> None:
     assert shown, "the picture is in the card"
     assert shown[0].pixmap().width() <= 360, "and scaled to fit the transcript"
     assert "2.10 s" in card.header.text()
+
+
+def test_no_module_of_the_app_chooses_a_qt_platform() -> None:
+    """The bug that made the window never appear on a real desktop.
+
+    One panel set ``QT_QPA_PLATFORM=offscreen`` at import time -- a convenience
+    for running GUI tests on a headless machine. But the window imports the
+    panels before Qt is asked for a platform, so on a machine with a display the
+    studio started *offscreen*: no window, an event loop that never returns, and
+    a process that looked alive and did nothing. Every test passed, because the
+    tests wanted offscreen.
+
+    An import must not decide where the window goes. The test suite sets the
+    variable itself, before Qt is imported; that is the right place for it.
+
+    Checked in the source rather than by importing: a module already imported by
+    an earlier test is cached, so the check would pass on the broken code.
+    """
+    app_dir = Path(__file__).resolve().parents[2] / "app"
+    offenders = [
+        path.relative_to(app_dir).as_posix()
+        for path in app_dir.rglob("*.py")
+        if "QT_QPA_PLATFORM" in path.read_text(encoding="utf-8")
+        and "os.environ.get" not in _only_reading(path)
+    ]
+    assert not offenders, f"these choose a Qt platform on import: {offenders}"
+
+
+def _only_reading(path: Path) -> str:
+    """The lines of ``path`` that only read the variable, which main.py may do."""
+    return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines() if "get(" in line)

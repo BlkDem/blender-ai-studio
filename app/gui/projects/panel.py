@@ -9,14 +9,11 @@ unrelated turns that could not be told apart six weeks later.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-from PySide6.QtCore import Qt, Signal  # noqa: E402
-from PySide6.QtWidgets import (  # noqa: E402
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
