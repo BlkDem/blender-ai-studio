@@ -383,7 +383,11 @@ class Agent:
                 reasoning.append(chunk.text)
                 self._publish(run_id, EventType.THINKING, text=chunk.text)
             elif chunk.type == "tool_start":
-                calls[chunk.call_id] = ToolCall(id=chunk.call_id, name=chunk.name)
+                calls[chunk.call_id] = ToolCall(
+                    id=chunk.call_id,
+                    name=chunk.name,
+                    thought_signature=chunk.thought_signature,
+                )
                 arguments[chunk.call_id] = ""
             elif chunk.type == "tool_delta":
                 arguments[chunk.call_id] = arguments.get(chunk.call_id, "") + chunk.partial
@@ -394,6 +398,8 @@ class Agent:
                 call = calls.get(chunk.call_id)
                 if call is not None:
                     call.arguments = chunk.arguments or _parse(arguments.get(chunk.call_id, ""))
+                    if chunk.thought_signature:
+                        call.thought_signature = chunk.thought_signature
             elif chunk.type == "usage":
                 usage = chunk.usage
             elif chunk.type == "end":

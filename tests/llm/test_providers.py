@@ -18,7 +18,7 @@ from app.llm.base import ChatRequest, Message, ToolCall, ToolSpec
 from app.llm.models import ModelInfo, cost_of
 from app.llm.providers.anthropic import AnthropicProvider
 from app.llm.providers.anthropic import _to_wire as anthropic_wire
-from app.llm.providers.gemini import GeminiProvider
+from app.llm.providers.gemini import GeminiProvider, _parse_candidates
 from app.llm.providers.gemini import _to_wire as gemini_wire
 from app.llm.providers.openai_compatible import OpenAICompatibleProvider, _to_wire
 
@@ -510,6 +510,68 @@ def test_gemini_sends_tools_beside_the_generation_config() -> None:
     assert payload["generationConfig"]["maxOutputTokens"] == 64
     names = [d["name"] for d in payload["tools"][0]["functionDeclarations"]]
     assert names == ["blender.get_scene"]
+
+
+def test_a_gemini_thought_signature_survives_the_round_trip() -> None:
+    """Gemini signs a call and refuses the result that comes back unsigned.
+
+    The signature is opaque to the studio, so the test is that it is carried
+    out of the response and put back on the wire untouched -- not that it is
+    understood.
+    """
+    from app.llm.providers.gemini import GeminiProvider
+
+    response = httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {"id": "c1", "name": "blender.get_scene", "args": {}},
+                                # A field of the part, beside functionCall. This
+                                # is where Google puts it, and reading it from
+                                # inside the call yields an empty string -- which
+                                # looks exactly like a model that sent none.
+                                "thoughtSignature": "Cq8CAbc...",
+                            }
+                        ]
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        },
+    )
+    parsed = _parse_candidates(response.json(), "gemini-3-flash-preview")
+    assert parsed.tool_calls[0].thought_signature == "Cq8CAbc..."
+
+    payload = GeminiProvider(api_key="k")._payload(
+        ChatRequest(
+            messages=[
+                Message.assistant("", parsed.tool_calls),
+                Message.tool_result(parsed.tool_calls[0], "{}"),
+            ],
+            model="gemini-3-flash-preview",
+        )
+    )
+    part = payload["contents"][0]["parts"][0]
+    assert part["thoughtSignature"] == "Cq8CAbc...", "the signature Google gave, handed back"
+    assert "thoughtSignature" not in part["functionCall"], "beside the call, not inside it"
+    assert payload["contents"][1]["parts"][0]["functionResponse"]["name"] == "blender.get_scene"
+
+
+def test_a_call_without_a_signature_is_sent_without_one() -> None:
+    """An older model sends no signature; inventing one would be a lie."""
+    from app.llm.providers.gemini import GeminiProvider
+
+    payload = GeminiProvider(api_key="k")._payload(
+        ChatRequest(
+            messages=[Message.assistant("", [ToolCall.new("t", {})])],
+            model="gemini-2.5-flash",
+        )
+    )
+    assert "thoughtSignature" not in payload["contents"][0]["parts"][0]["functionCall"]
 
 
 def test_gemini_leaves_the_calling_mode_to_google_when_it_is_not_pinned() -> None:

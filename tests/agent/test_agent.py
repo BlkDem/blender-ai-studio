@@ -17,7 +17,7 @@ import pytest
 from app.core.agent import BASE_SYSTEM_PROMPT, Agent, LocalTool
 from app.core.cost import Budget
 from app.core.events import EventBus, EventType
-from app.llm.base import Message
+from app.llm.base import Message, StreamChunk
 from app.llm.models import ModelInfo
 from app.llm.providers.mock import MockLLMProvider, ScriptedTurn
 from app.mcp.manager import MCPManager
@@ -91,6 +91,62 @@ def agent_with(mcp: FakeMCP, *turns: ScriptedTurn, **kwargs) -> Agent:
     }
     defaults.update(kwargs)
     return Agent(provider, "mock-model", mcp, **defaults)
+
+
+class _SignedStreamProvider(MockLLMProvider):
+    """A stream that carries a Gemini thought signature on its tool call.
+
+    The signature is the sort of thing that only exists on the wire, so a test
+    double built from names and arguments cannot show it going missing. This
+    one can. It does its own bookkeeping rather than replaying a script,
+    because the script belongs to the base class' stream, which is replaced.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.turns = 0
+
+    async def stream(self, request):  # type: ignore[override]
+        self.requests.append(request)
+        self.turns += 1
+        yield StreamChunk(type="start")
+        if self.turns == 1:
+            yield StreamChunk(
+                type="tool_start",
+                call_id="c1",
+                name="blender.get_scene",
+                thought_signature="Cq8CAbc...",
+            )
+            yield StreamChunk(type="tool_end", call_id="c1", name="blender.get_scene", arguments={})
+        else:
+            yield StreamChunk(type="text", text="There is one cube.")
+        yield StreamChunk(type="end", text="", finish_reason="stop")
+
+
+async def test_a_gemini_signature_survives_the_agents_own_reassembly(mcp: FakeMCP) -> None:
+    """The agent rebuilds a tool call from the chunks it was given.
+
+    It is a different function from the one that parsed the response, so
+    anything it does not copy is lost by the next turn -- and Gemini refuses a
+    tool result whose call came back unsigned.
+    """
+    provider = _SignedStreamProvider(
+        models=[ModelInfo(id="mock-model", provider="mock", input_price=0.0, output_price=0.0)]
+    )
+    agent = Agent(
+        provider,
+        "mock-model",
+        mcp,
+        bus=EventBus(),
+        model_info=ModelInfo(id="mock-model", provider="mock", input_price=0.0, output_price=0.0),
+    )
+    await agent.run("look around")
+
+    assert mcp.calls == [("blender.get_scene", {})], "the tool still ran"
+    history = provider.requests[1].messages
+    remembered = [c for m in history for c in (m.tool_calls or [])]
+    assert remembered, "the call is in the history"
+    assert remembered[0].thought_signature == "Cq8CAbc..."
 
 
 # --- the basics -------------------------------------------------------------

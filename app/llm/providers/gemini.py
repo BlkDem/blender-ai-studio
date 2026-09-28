@@ -169,14 +169,21 @@ class GeminiProvider(LLMProvider):
                                     id=call.get("id") or f"call_{len(calls)}",
                                     name=call.get("name") or "",
                                     arguments=call.get("args") or {},
+                                    thought_signature=part.get("thoughtSignature") or "",
                                 )
                                 calls.append(tool)
-                                yield StreamChunk(type="tool_start", call_id=tool.id, name=tool.name)
+                                yield StreamChunk(
+                                    type="tool_start",
+                                    call_id=tool.id,
+                                    name=tool.name,
+                                    thought_signature=tool.thought_signature,
+                                )
                                 yield StreamChunk(
                                     type="tool_end",
                                     call_id=tool.id,
                                     name=tool.name,
                                     arguments=tool.arguments,
+                                    thought_signature=tool.thought_signature,
                                 )
                     reported = event.get("usageMetadata") or {}
                     if reported:
@@ -259,6 +266,13 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
                 call_part: dict[str, Any] = {"functionCall": {"name": call.name, "args": call.arguments}}
                 if call.id:
                     call_part["functionCall"]["id"] = call.id
+                if call.thought_signature:
+                    # A field of the part, beside functionCall -- not inside it.
+                    # Sent back exactly as it arrived: Gemini 3 refuses the
+                    # result of a call whose signature did not come back, and
+                    # reports it as degraded performance rather than as a
+                    # conversation it cannot continue.
+                    call_part["thoughtSignature"] = call.thought_signature
                 parts.append(call_part)
             if message.content:
                 parts.insert(0, {"text": message.content})
@@ -300,6 +314,10 @@ def _parse_candidates(payload: dict[str, Any], model_id: str) -> ChatResponse:
                     id=call.get("id") or f"call_{len(calls)}",
                     name=call.get("name") or "",
                     arguments=call.get("args") or {},
+                    # On the part, beside functionCall. Read from inside the
+                    # call it is always empty, and an empty signature is
+                    # indistinguishable from a model that sent none.
+                    thought_signature=part.get("thoughtSignature") or "",
                 )
             )
     return ChatResponse(
@@ -351,4 +369,10 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
         return AuthenticationError(provider, text or "The provider rejected the API key")
     if status == 429:
         return RateLimitError(provider)
+    if status >= 500:
+        # The provider is out of capacity, not the request. Reported as
+        # retryable so it is not read as a configuration to go and fix.
+        return ProviderError(
+            text or f"HTTP {status}", provider=provider, status=status, retryable=True
+        )
     return ProviderError(text or f"HTTP {status}", provider=provider, status=status)

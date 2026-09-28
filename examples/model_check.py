@@ -11,7 +11,10 @@ time, and prints a table:
 1. **keyed** — is there a key for this provider at all;
 2. **answers** — does a plain request come back;
 3. **tools** — does it call a tool when asked, by its dotted MCP name;
-4. **sees** — for models declared multimodal, does an image survive a round
+4. **goes on** — after calling a tool, can it use the answer? Some providers
+   attach something to a call that has to come back with the result, and the
+   second request is refused when it does not.
+5. **sees** — for models declared multimodal, does an image survive a round
    trip (only asked when the catalog claims it).
 
 Anything keyed and broken is a mistake worth fixing before a session does, so
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +82,12 @@ ASK_FOR_TOOL = (
 )
 ASK_ABOUT_IMAGE = "This is an image. Reply with one word: what colour is it?"
 
+#: What a tool answered, handed back for the second turn. A model can call a
+#: tool and still be unable to continue: the second request has to carry
+#: whatever the provider attached to the call it is answering, and Gemini
+#: refuses one whose thought signature did not come back.
+TOOL_RESULT = json.dumps({"name": "Probe", "type": "CYLINDER", "created": True})
+
 
 @dataclass
 class Verdict:
@@ -88,6 +98,7 @@ class Verdict:
     answers: str = ""
     tools: str = ""
     sees: str = ""
+    continues: str = ""
     limited: bool = False
 
     @property
@@ -105,7 +116,8 @@ class Verdict:
 
         return (
             f"{self.provider:<11} {self.model:<40} "
-            f"{mark(self.answers):<10} {mark(self.tools):<10} {mark(self.sees):<10}"
+            f"{mark(self.answers):<10} {mark(self.tools):<10} "
+            f"{mark(self.continues):<10} {mark(self.sees):<10}"
         )
 
 
@@ -114,7 +126,7 @@ async def check_one(
 ) -> Verdict:
     verdict = Verdict(provider=provider_name, model=model, vision=vision, keyed=keyed)
     if not keyed:
-        verdict.answers = verdict.tools = verdict.sees = "skipped"
+        verdict.answers = verdict.tools = verdict.continues = verdict.sees = "skipped"
         return verdict
 
     try:
@@ -126,9 +138,9 @@ async def check_one(
         # nothing. That is a budget too small, not a model that is broken.
         verdict.answers = "ok" if text else ("reasoning only" if reply.reasoning else "empty")
     except Exception as exc:  # noqa: BLE001 - the point of the script is to report these
-        verdict.limited = isinstance(exc, RateLimitError)
-        verdict.answers = "rate limited" if verdict.limited else f"error: {_short(exc)}"
-        verdict.tools = verdict.sees = "skipped"
+        verdict.limited = _transient(exc)
+        verdict.answers = "unavailable" if verdict.limited else f"error: {_short(exc)}"
+        verdict.tools = verdict.continues = verdict.sees = "skipped"
         return verdict
 
     try:
@@ -148,10 +160,32 @@ async def check_one(
         else:
             verdict.tools = "no"
     except Exception as exc:  # noqa: BLE001
-        verdict.limited = verdict.limited or isinstance(exc, RateLimitError)
-        verdict.tools = "rate limited" if verdict.limited else f"error: {_short(exc)}"
-        verdict.sees = "skipped"
+        verdict.limited = verdict.limited or _transient(exc)
+        verdict.tools = "unavailable" if verdict.limited else f"error: {_short(exc)}"
+        verdict.continues = verdict.sees = "skipped"
         return verdict
+
+    if verdict.tools == "ok":
+        try:
+            follow = await provider.chat(
+                ChatRequest(
+                    model=model,
+                    messages=[
+                        Message.user(ASK_FOR_TOOL),
+                        Message.assistant("", reply.tool_calls),
+                        Message.tool_result(reply.tool_calls[0], TOOL_RESULT),
+                    ],
+                    tools=[THE_TOOL],
+                    max_tokens=PLAIN_MAX_TOKENS,
+                )
+            )
+            verdict.continues = "ok" if (follow.text or "").strip() else "empty"
+        except Exception as exc:  # noqa: BLE001
+            verdict.limited = verdict.limited or _transient(exc)
+            verdict.continues = "unavailable" if verdict.limited else f"error: {_short(exc)}"
+            verdict.sees = "skipped"
+    else:
+        verdict.continues = "skipped"
 
     if vision:
         message = Message(
@@ -182,6 +216,16 @@ async def check_one(
     return verdict
 
 
+def _transient(exc: object) -> bool:
+    """Broken, or busy?
+
+    A provider with no capacity for the moment, or one holding this account to
+    a quota, is not a configuration that needs fixing. A report that calls that
+    broken sends the user to edit something which is already right.
+    """
+    return isinstance(exc, RateLimitError) or bool(getattr(exc, "retryable", False))
+
+
 def _short(exc: object, limit: int = 160) -> str:
     text = " ".join(str(exc).split())
     return text[:limit]
@@ -207,7 +251,7 @@ async def main(options: argparse.Namespace) -> int:
         print("No providers are configured. Check STUDIO_LLM_PROVIDERS in .env.", file=sys.stderr)
         return 1
 
-    print(f"{'provider':<11} {'model':<40} {'answers':<10} {'tools':<10} {'sees':<10}")
+    print(f"{'provider':<11} {'model':<40} {'answers':<10} {'tools':<10} {'goes on':<10} {'sees':<10}")
     print("-" * 84)
     verdicts: list[Verdict] = []
     for provider_name, model_id in wanted:
@@ -234,13 +278,14 @@ async def main(options: argparse.Namespace) -> int:
         print("      It will not drive Blender. Keep it for questions, not for scenes.")
     for verdict in problems:
         print(
-            f"broken: {verdict.provider}/{verdict.model} -- answers={verdict.answers} tools={verdict.tools}"
+            f"broken: {verdict.provider}/{verdict.model} -- answers={verdict.answers} "
+            f"tools={verdict.tools} goes_on={verdict.continues}"
         )
     throttled = [v for v in verdicts if v.limited]
     for verdict in throttled:
         print(
-            f"rate limited: {verdict.provider}/{verdict.model} -- the account is fine, "
-            f"the shared pool is empty. Try again later."
+            f"unavailable: {verdict.provider}/{verdict.model} -- the account is fine, "
+            f"the provider is busy. Try again later."
         )
     if problems:
         print(f"\n{len(problems)} configured model(s) are broken. Fix those before a session.")

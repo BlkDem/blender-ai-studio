@@ -515,6 +515,13 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
         return AuthenticationError(provider, text or "The provider rejected the API key")
     if status == 429:
         return RateLimitError(provider)
+    if status >= 500:
+        return ProviderError(
+            text or f"HTTP {status}",
+            provider=provider,
+            status=status,
+            retryable=True,
+        )
     if status == 404:
         return ProviderError(
             text or "No such endpoint or model",

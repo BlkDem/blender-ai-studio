@@ -49,6 +49,10 @@ class ToolCall:
     #: Providers stream arguments as partial JSON. Kept for the GUI; providers
     #: assemble it themselves before yielding the completed call.
     partial: str = ""
+    #: Gemini signs a function call with a thought signature and refuses the
+    #: result that comes back without it. It is not the studio's to interpret,
+    #: so it is carried, not read.
+    thought_signature: str = ""
 
     @classmethod
     def new(cls, name: str, arguments: dict[str, Any]) -> ToolCall:
@@ -313,6 +317,10 @@ class StreamChunk:
     usage: Usage | None = None
     finish_reason: str = ""
     reasoning: str = ""
+    #: Carried alongside a tool call, because whoever assembles the finished
+    #: call from chunks is a different function from the one that parsed it, and
+    #: whatever that function leaves out is gone by the next turn.
+    thought_signature: str = ""
 
 
 class LLMProvider(ABC):
