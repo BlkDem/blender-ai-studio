@@ -157,18 +157,20 @@ class ToolSpec:
     def from_json_schema(cls, name: str, schema: dict[str, Any], description: str = "") -> ToolSpec:
         return cls(name=name, description=description, parameters=schema or {"type": "object"})
 
-    def to_openai(self) -> dict[str, Any]:
+    def to_openai(self, name: str | None = None) -> dict[str, Any]:
+        """``name`` overrides the wire name, for a provider that forbids dots."""
         return {
             "type": "function",
             "function": {
-                "name": self.name,
+                "name": name or self.name,
                 "description": self.description,
                 "parameters": self.parameters,
             },
         }
 
-    def to_anthropic(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description, "input_schema": self.parameters}
+    def to_anthropic(self, name: str | None = None) -> dict[str, Any]:
+        """``name`` overrides the wire name, for a provider that forbids dots."""
+        return {"name": name or self.name, "description": self.description, "input_schema": self.parameters}
 
     def to_gemini(self) -> dict[str, Any]:
         return {

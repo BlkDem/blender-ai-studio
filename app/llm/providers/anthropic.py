@@ -34,6 +34,7 @@ from app.llm.base import (
     ensure_not_empty,
 )
 from app.llm.models import ModelInfo, cost_of
+from app.llm.naming import ToolNameMap
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,9 @@ class AnthropicProvider(LLMProvider):
             )
         return self._client
 
-    def _payload(self, request: ChatRequest, *, stream: bool) -> dict[str, Any]:
+    def _payload(
+        self, request: ChatRequest, *, stream: bool, names: ToolNameMap | None = None
+    ) -> dict[str, Any]:
         system, messages = _to_wire(request.messages)
         payload: dict[str, Any] = {
             "model": request.model,
@@ -111,7 +114,10 @@ class AnthropicProvider(LLMProvider):
         if request.stop:
             payload["stop_sequences"] = request.stop
         if request.tools:
-            payload["tools"] = [tool.to_anthropic() for tool in request.tools]
+            # Anthropic's tool names follow the same pattern as OpenAI's, so a
+            # dotted MCP name has to travel translated here too.
+            mapping = names or ToolNameMap()
+            payload["tools"] = [tool.to_anthropic(mapping.to_wire(tool.name)) for tool in request.tools]
             if request.tool_choice == "any":
                 payload["tool_choice"] = {"type": "any"}
             elif request.tool_choice == "none":
@@ -121,8 +127,11 @@ class AnthropicProvider(LLMProvider):
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         started = time.perf_counter()
+        names = ToolNameMap([tool.name for tool in request.tools or []])
         try:
-            response = await self._http().post("/v1/messages", json=self._payload(request, stream=False))
+            response = await self._http().post(
+                "/v1/messages", json=self._payload(request, stream=False, names=names)
+            )
         except httpx.HTTPError as exc:
             raise ProviderError(
                 f"Anthropic request failed: {exc}", provider=self.name, retryable=True
@@ -130,7 +139,7 @@ class AnthropicProvider(LLMProvider):
         if response.status_code >= 400:
             raise _error_for(self.name, response.status_code, response.content)
         payload = _json(response)
-        parsed = _parse_message(payload, request.model)
+        parsed = _parse_message(payload, request.model, names)
         parsed.latency_ms = (time.perf_counter() - started) * 1000
         return ensure_not_empty(parsed, self.name)
 
@@ -145,11 +154,12 @@ class AnthropicProvider(LLMProvider):
         # accumulated per index and only become a ToolCall at block stop.
         blocks: dict[int, dict[str, Any]] = {}
         partial: dict[int, str] = {}
+        names = ToolNameMap([tool.name for tool in request.tools or []])
         usage_sent = False
 
         try:
             async with self._http().stream(
-                "POST", "/v1/messages", json=self._payload(request, stream=True)
+                "POST", "/v1/messages", json=self._payload(request, stream=True, names=names)
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
@@ -182,7 +192,9 @@ class AnthropicProvider(LLMProvider):
                             yield StreamChunk(
                                 type="tool_start",
                                 call_id=block.get("id") or "",
-                                name=block.get("name") or "",
+                                name=names.to_model(block.get("name") or "")
+                                if names
+                                else (block.get("name") or ""),
                             )
 
                     elif kind == "content_block_delta":
@@ -214,7 +226,9 @@ class AnthropicProvider(LLMProvider):
                             yield StreamChunk(
                                 type="tool_end",
                                 call_id=block.get("id") or "",
-                                name=block.get("name") or "",
+                                name=names.to_model(block.get("name") or "")
+                                if names
+                                else (block.get("name") or ""),
                                 arguments=_parse_arguments(partial.get(index, "")),
                             )
 
@@ -328,7 +342,7 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
     return "\n\n".join(chunk for chunk in system_chunks if chunk), wire
 
 
-def _parse_message(payload: dict[str, Any], model_id: str) -> ChatResponse:
+def _parse_message(payload: dict[str, Any], model_id: str, names: ToolNameMap | None = None) -> ChatResponse:
     text: list[str] = []
     reasoning: list[str] = []
     calls: list[ToolCall] = []
@@ -342,7 +356,7 @@ def _parse_message(payload: dict[str, Any], model_id: str) -> ChatResponse:
             calls.append(
                 ToolCall(
                     id=block.get("id") or "",
-                    name=block.get("name") or "",
+                    name=names.to_model(block.get("name") or "") if names else (block.get("name") or ""),
                     arguments=block.get("input") or {},
                 )
             )

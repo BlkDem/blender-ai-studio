@@ -34,6 +34,7 @@ from app.llm.base import (
     ensure_not_empty,
 )
 from app.llm.models import ModelInfo, cost_of
+from app.llm.naming import ToolNameMap
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +107,9 @@ class OpenAICompatibleProvider(LLMProvider):
             )
         return self._client
 
-    def _payload(self, request: ChatRequest, *, stream: bool) -> dict[str, Any]:
+    def _payload(
+        self, request: ChatRequest, *, stream: bool, names: ToolNameMap | None = None
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": [_to_wire(message) for message in request.messages],
@@ -119,7 +122,10 @@ class OpenAICompatibleProvider(LLMProvider):
         if request.stop:
             payload["stop"] = request.stop
         if request.tools:
-            payload["tools"] = [tool.to_openai() for tool in request.tools]
+            # Dotted MCP names are rejected by OpenAI and most servers that speak
+            # its dialect, so they go out translated and come back translated.
+            mapping = names or ToolNameMap()
+            payload["tools"] = [tool.to_openai(mapping.to_wire(tool.name)) for tool in request.tools]
             payload["tool_choice"] = request.tool_choice if request.tool_choice != "auto" else "auto"
         if stream:
             # Without this the final usage is absent and a streamed run's cost is
@@ -130,9 +136,10 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         started = time.perf_counter()
-        response = await self._post("/chat/completions", self._payload(request, stream=False))
+        names = ToolNameMap([tool.name for tool in request.tools or []])
+        response = await self._post("/chat/completions", self._payload(request, stream=False, names=names))
         payload = _json(response)
-        parsed = _parse_completion(payload, request.model)
+        parsed = _parse_completion(payload, request.model, names=names)
         parsed.latency_ms = (time.perf_counter() - started) * 1000
         return ensure_not_empty(parsed, self.name)
 
@@ -144,10 +151,13 @@ class OpenAICompatibleProvider(LLMProvider):
         text: list[str] = []
         calls: dict[int, ToolCall] = {}
         collected: dict[int, str] = {}
+        names = ToolNameMap([tool.name for tool in request.tools or []])
 
         try:
             async with self._http().stream(
-                "POST", "/chat/completions", json=self._payload(request, stream=True)
+                "POST",
+                "/chat/completions",
+                json=self._payload(request, stream=True, names=names),
             ) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
@@ -175,10 +185,14 @@ class OpenAICompatibleProvider(LLMProvider):
                             call_id = call.get("id")
                             function = call.get("function") or {}
                             if call_id:
-                                calls[index] = ToolCall(id=call_id, name=function.get("name", ""))
+                                calls[index] = ToolCall(
+                                    id=call_id, name=names.to_model(function.get("name", ""))
+                                )
                                 collected[index] = ""
                                 yield StreamChunk(
-                                    type="tool_start", call_id=call_id, name=function.get("name", "")
+                                    type="tool_start",
+                                    call_id=call_id,
+                                    name=names.to_model(function.get("name", "")),
                                 )
                             arguments = function.get("arguments")
                             if arguments:
@@ -341,7 +355,9 @@ def _to_wire(message: Message) -> dict[str, Any]:
     return {"role": str(message.role), "content": text}
 
 
-def _parse_completion(payload: dict[str, Any], model_id: str) -> ChatResponse:
+def _parse_completion(
+    payload: dict[str, Any], model_id: str, names: ToolNameMap | None = None
+) -> ChatResponse:
     choices = payload.get("choices") or []
     if not choices:
         return ChatResponse(model=model_id, raw=payload, finish_reason="no_choices")
@@ -349,7 +365,12 @@ def _parse_completion(payload: dict[str, Any], model_id: str) -> ChatResponse:
     calls = [
         ToolCall(
             id=(call.get("id") or f"call_{index}"),
-            name=(call.get("function") or {}).get("name", ""),
+            # Back to the studio's name, so the tool is found again.
+            name=(
+                names.to_model((call.get("function") or {}).get("name", ""))
+                if names
+                else (call.get("function") or {}).get("name", "")
+            ),
             arguments=_parse_arguments((call.get("function") or {}).get("arguments", "")),
         )
         for index, call in enumerate(message.get("tool_calls") or [])
