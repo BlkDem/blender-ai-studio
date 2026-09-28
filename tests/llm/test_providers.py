@@ -488,6 +488,39 @@ def test_gemini_rejects_unknown_schema_keywords() -> None:
     assert "default" not in cleaned["properties"]["a"]
 
 
+def test_gemini_sends_tools_beside_the_generation_config() -> None:
+    """Google answers a tool nested in generationConfig with "Unknown name",
+    which reads like a schema problem and costs the model every tool it has."""
+    from app.llm.providers.gemini import GeminiProvider
+
+    payload = GeminiProvider(api_key="k")._payload(
+        ChatRequest(
+            messages=[Message.user("go")],
+            model="m",
+            tools=[ToolSpec("blender.get_scene", description="look")],
+            tool_choice="any",
+            temperature=0.5,
+            max_tokens=64,
+        )
+    )
+    assert "tools" in payload, "a tool the model cannot see is not a tool"
+    assert "tools" not in payload.get("generationConfig", {})
+    assert "tool_calling_config" not in payload.get("generationConfig", {})
+    assert payload["toolConfig"]["functionCallingConfig"]["mode"] == "ANY"
+    assert payload["generationConfig"]["maxOutputTokens"] == 64
+    names = [d["name"] for d in payload["tools"][0]["functionDeclarations"]]
+    assert names == ["blender.get_scene"]
+
+
+def test_gemini_leaves_the_calling_mode_to_google_when_it_is_not_pinned() -> None:
+    from app.llm.providers.gemini import GeminiProvider
+
+    payload = GeminiProvider(api_key="k")._payload(
+        ChatRequest(messages=[Message.user("go")], model="m", tools=[ToolSpec("t")])
+    )
+    assert "toolConfig" not in payload, "AUTO is the default; sending it says nothing"
+
+
 async def test_gemini_parses_function_calls_and_usage() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

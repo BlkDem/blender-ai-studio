@@ -94,17 +94,21 @@ class GeminiProvider(LLMProvider):
             config["maxOutputTokens"] = request.max_tokens
         if request.stop:
             config["stopSequences"] = request.stop
-        if request.tools:
-            config["tools"] = [{"functionDeclarations": [tool.to_gemini() for tool in request.tools]}]
-            if request.tool_choice == "any":
-                config["tool_calling_config"] = {"mode": "ANY"}
-            elif request.tool_choice == "none":
-                config["tool_calling_config"] = {"mode": "NONE"}
         payload: dict[str, Any] = {"contents": contents}
         if system:
             payload["systemInstruction"] = {"parts": [{"text": system}]}
         if config:
             payload["generationConfig"] = config
+        # Tools and the calling mode are siblings of generationConfig, not
+        # fields inside it. Nesting them there is answered with "Unknown name
+        # at 'generation_config'", which is Google's way of saying the model
+        # can never reach a tool -- the one thing a tool-calling session needs.
+        if request.tools:
+            payload["tools"] = [{"functionDeclarations": [tool.to_gemini() for tool in request.tools]}]
+            if request.tool_choice in ("any", "none"):
+                payload["toolConfig"] = {
+                    "functionCallingConfig": {"mode": "ANY" if request.tool_choice == "any" else "NONE"}
+                }
         payload.update(request.extra)
         return payload
 
