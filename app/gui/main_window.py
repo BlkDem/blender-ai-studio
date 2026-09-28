@@ -604,6 +604,11 @@ class MainWindow(QMainWindow):
     def _set_api_key(self, provider: str, api_key: str) -> None:
         if not provider:
             return
+        if self.context.llm is not None and self.context.llm.config(provider) is None:
+            # A key stored under a name nothing is configured for is a trap: it
+            # looks saved, and the provider it was meant for stays "no key".
+            self.chat.add_note(f"There is no provider called '{provider}'.", role="error")
+            return
         self.core.submit(self._store_key(provider, api_key), self._key_stored)
 
     async def _store_key(self, provider: str, api_key: str) -> str:
@@ -625,6 +630,9 @@ class MainWindow(QMainWindow):
 
     def _key_stored(self, provider: str) -> None:
         self.chat.add_note(f"Key for '{provider}' saved.", role="system")
+        # The table still shows the old state, so the column that says "no key"
+        # would contradict the note above it until something else refreshed it.
+        self._show_providers()
         self._show_three_d_status()
 
     def _setting_changed(self, key: str, value: Any) -> None:

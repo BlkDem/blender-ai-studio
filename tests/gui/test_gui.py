@@ -380,6 +380,68 @@ def test_scoring_a_run_needs_a_selected_row(qapp) -> None:
 # --- the window, with a real agent -----------------------------------------
 
 
+async def test_a_key_can_be_given_to_a_provider_without_being_redefined(window, qapp) -> None:
+    """The key is what was missing; the provider is what works.
+
+    "Add provider" also sets a key, and also replaces the whole configuration
+    with a placeholder model. So it was the only way to enable a configured
+    provider, and the price was losing the model list it already had.
+    """
+    from app.storage.secrets import key_name
+
+    before = window.context.llm.config("scripted")
+    assert before is not None
+    window.models.existing_provider.setCurrentText("scripted")
+    window.models.existing_key.setText("sk-test")
+    window.models.save_existing_key.click()
+    for _ in range(40):
+        qapp.processEvents()
+        await asyncio.sleep(0.01)
+
+    assert window.context.secrets.get(key_name("scripted")) == "sk-test"
+    after = window.context.llm.config("scripted")
+    assert after.models == before.models, "setting a key did not touch the model list"
+    assert after.default_model == before.default_model
+
+
+async def test_a_key_for_a_provider_that_does_not_exist_is_refused(window, qapp) -> None:
+    """A key stored under an unknown name looks saved and enables nothing.
+
+    The combo cannot produce that name, but a typed one can -- the 3D provider
+    field is a free-text line, and a provider can be removed while its key is
+    still on screen.
+    """
+    from app.storage.secrets import key_name
+
+    window._set_api_key("nonesuch", "sk-test")
+    for _ in range(20):
+        qapp.processEvents()
+        await asyncio.sleep(0.01)
+
+    assert not window.context.secrets.get(key_name("nonesuch"))
+    assert "nonesuch" in window.chat.transcript_text()
+
+
+def test_the_models_panel_offers_a_key_for_each_configured_provider(qapp) -> None:
+    panel = ModelsPanel(secrets_backend="file")
+    panel.show_providers(
+        [{"name": "gemini", "kind": "gemini"}, {"name": "groq", "kind": "openai-compatible"}]
+    )
+    names = [panel.existing_provider.itemText(i) for i in range(panel.existing_provider.count())]
+    assert names == ["gemini", "groq"]
+    assert panel.existing_key.echoMode().name == "Password", "a key is never shown in the clear"
+
+    seen: list[tuple[str, str]] = []
+    panel.set_api_key.connect(lambda provider, key: seen.append((provider, key)))
+    panel.existing_provider.setCurrentText("gemini")
+    panel.existing_key.setText("sk-abc")
+    panel.save_existing_key.click()
+    assert seen == [("gemini", "sk-abc")]
+
+    panel.clear_existing_key.click()
+    assert seen[-1] == ("gemini", ""), "an empty key clears it, which is the only way to"
+
+
 async def test_the_window_runs_a_turn_and_shows_every_step(window, qapp) -> None:
     window.model_selector.setCurrentIndex(0)
     window.send("what is in the scene?")

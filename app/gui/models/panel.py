@@ -12,8 +12,10 @@ from typing import Any
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
@@ -75,6 +77,33 @@ class ModelsPanel(QWidget):
         self.providers_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.providers_table)
 
+        # A key for a provider that is already configured. "Add provider" is the
+        # other way to set one, and it replaces the whole configuration -- the
+        # model list, the default model -- with a placeholder. So adding a key
+        # used to mean risking the provider it was meant to enable.
+        existing = QGroupBox("Key for a configured provider")
+        existing_form = QFormLayout(existing)
+        self.existing_provider = QComboBox()
+        self.existing_key = QLineEdit()
+        self.existing_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.save_existing_key = QPushButton("Set key")
+        self.save_existing_key.clicked.connect(
+            lambda: self.set_api_key.emit(
+                self.existing_provider.currentText().strip(), self.existing_key.text()
+            )
+        )
+        self.clear_existing_key = QPushButton("Clear key")
+        self.clear_existing_key.clicked.connect(
+            lambda: self.set_api_key.emit(self.existing_provider.currentText().strip(), "")
+        )
+        existing_form.addRow("Provider", self.existing_provider)
+        existing_form.addRow("API key", self.existing_key)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.save_existing_key)
+        buttons.addWidget(self.clear_existing_key)
+        existing_form.addRow("", buttons)
+        layout.addWidget(existing)
+
         three_d = QGroupBox("3D provider")
         three_d_form = QFormLayout(three_d)
         self.three_d_provider = QLineEdit("tripo")
@@ -109,6 +138,13 @@ class ModelsPanel(QWidget):
     # --- data --------------------------------------------------------------
 
     def show_providers(self, providers: list[dict[str, Any]]) -> None:
+        chosen = self.existing_provider.currentText()
+        self.existing_provider.clear()
+        self.existing_provider.addItems(
+            [str(entry.get("name", "")) for entry in providers if entry.get("name")]
+        )
+        if chosen in [self.existing_provider.itemText(i) for i in range(self.existing_provider.count())]:
+            self.existing_provider.setCurrentText(chosen)
         self.providers_table.setRowCount(len(providers))
         for row, entry in enumerate(providers):
             values = [
