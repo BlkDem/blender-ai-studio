@@ -13,18 +13,58 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+
+def _paste_into(field: QLineEdit) -> None:
+    """Put the clipboard in the field.
+
+    A key field cannot rely on the keyboard or the platform's own menu: Qt
+    drops the standard context menu for a password echo mode, and a shortcut
+    that is swallowed once leaves no way in at all. Reading the clipboard is
+    the one route that does not depend on how the field was drawn.
+    """
+    text = QApplication.clipboard().text().strip()
+    if not text:
+        return
+    field.setText(text)
+    field.setCursorPosition(len(text))
+
+
+def _key_context_menu(field: QLineEdit, position: Any) -> None:
+    """Right-click on a secret: paste in, but never copy out."""
+    menu = QMenu(field)
+    menu.addAction("Paste", lambda: _paste_into(field))
+    menu.addSeparator()
+    menu.addAction("Select all", field.selectAll)
+    return menu.exec(field.mapToGlobal(position))
+
+
+def _make_key_field(placeholder: str = "paste the key, then Save") -> QLineEdit:
+    field = QLineEdit()
+    field.setEchoMode(QLineEdit.EchoMode.Password)
+    field.setPlaceholderText(placeholder)
+    # The default menu is withheld for a password field, which is a sensible
+    # default that leaves a secret with no way in but typing it out.
+    field.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    field.customContextMenuRequested.connect(
+        lambda position, target=field: _key_context_menu(target, position)
+    )
+    return field
+
 
 MODEL_COLUMNS = ["Model", "Provider", "Tools", "Vision", "Context", "$/M in", "$/M out"]
 
@@ -52,8 +92,7 @@ class ModelsPanel(QWidget):
         self.provider_kind = QLineEdit("openai-compatible")
         self.provider_base_url = QLineEdit()
         self.provider_base_url.setPlaceholderText("https://gateway.example/v1")
-        self.provider_key = QLineEdit()
-        self.provider_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.provider_key = _make_key_field()
         self.provider_key.setPlaceholderText(f"stored in: {secrets_backend}")
         self.add_provider = QPushButton("Add provider")
         self.add_provider.clicked.connect(
@@ -92,9 +131,10 @@ class ModelsPanel(QWidget):
         existing = QGroupBox("API key for the selected provider")
         existing_form = QFormLayout(existing)
         self.key_target = QLabel("Select a provider in the table above.")
-        self.existing_key = QLineEdit()
-        self.existing_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.existing_key.setPlaceholderText("paste the key, then Save")
+        self.existing_key = _make_key_field()
+        self.paste_existing_key = QPushButton("Paste")
+        self.paste_existing_key.setEnabled(False)
+        self.paste_existing_key.clicked.connect(lambda: _paste_into(self.existing_key))
         self.save_existing_key = QPushButton("Save key")
         self.save_existing_key.setEnabled(False)
         self.save_existing_key.clicked.connect(
@@ -106,6 +146,7 @@ class ModelsPanel(QWidget):
         existing_form.addRow("Saving for", self.key_target)
         existing_form.addRow("API key", self.existing_key)
         buttons = QHBoxLayout()
+        buttons.addWidget(self.paste_existing_key)
         buttons.addWidget(self.save_existing_key)
         buttons.addWidget(self.clear_existing_key)
         existing_form.addRow("", buttons)
@@ -114,8 +155,7 @@ class ModelsPanel(QWidget):
         three_d = QGroupBox("3D provider")
         three_d_form = QFormLayout(three_d)
         self.three_d_provider = QLineEdit("tripo")
-        self.three_d_key = QLineEdit()
-        self.three_d_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.three_d_key = _make_key_field()
         self.save_three_d = QPushButton("Save 3D settings")
         self.save_three_d.clicked.connect(
             lambda: self.set_api_key.emit(self.three_d_provider.text().strip(), self.three_d_key.text())
@@ -161,6 +201,7 @@ class ModelsPanel(QWidget):
         name = self._selected_provider()
         self.existing_key.clear()
         self.key_target.setText(name or "Select a provider in the table above.")
+        self.paste_existing_key.setEnabled(bool(name))
         self.save_existing_key.setEnabled(bool(name))
         self.clear_existing_key.setEnabled(bool(name))
 

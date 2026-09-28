@@ -423,6 +423,40 @@ async def test_a_key_for_a_provider_that_does_not_exist_is_refused(window, qapp)
     assert "nonesuch" in window.chat.transcript_text()
 
 
+def test_a_key_can_be_pasted_without_the_keyboard(qapp) -> None:
+    """A password field has no standard context menu, and a shortcut that gets
+    swallowed once leaves a secret with no way in but typing it out in full."""
+    from PySide6.QtGui import QGuiApplication
+
+    from app.gui.models.panel import _paste_into
+
+    panel = ModelsPanel(secrets_backend="file")
+    panel.show_providers([{"name": "gemini", "kind": "gemini"}])
+    QGuiApplication.clipboard().setText("  sk-from-clipboard\n")
+
+    assert panel.paste_existing_key.isEnabled() is False, "no row, no paste"
+    panel.providers_table.selectRow(0)
+    panel.paste_existing_key.click()
+    assert panel.existing_key.text() == "sk-from-clipboard", "trimmed, and not with a newline"
+
+    _paste_into(panel.existing_key)
+    assert panel.existing_key.text() == "sk-from-clipboard", "pasting twice is not two keys"
+
+
+def test_every_field_that_holds_a_secret_can_be_pasted_into(qapp) -> None:
+    """Three fields hold keys. All three have to accept one."""
+    from PySide6.QtGui import QGuiApplication
+
+    from app.gui.models.panel import _paste_into
+
+    panel = ModelsPanel(secrets_backend="file")
+    QGuiApplication.clipboard().setText("sk-shared")
+    for field in (panel.existing_key, panel.provider_key, panel.three_d_key):
+        _paste_into(field)
+        assert field.text() == "sk-shared"
+        assert field.echoMode().name == "Password", "and still does not show it"
+
+
 def test_the_key_button_saves_for_the_selected_row_and_nowhere_else(qapp) -> None:
     panel = ModelsPanel(secrets_backend="file")
     panel.show_providers(
