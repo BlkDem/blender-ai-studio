@@ -61,6 +61,23 @@ A provider whose `kind` is not in the table is still looked up as
   response the agent will stop on. A provider that raises `ValueError` from a
   malformed answer takes the run down rather than telling the model what was
   wrong with it.
+- **Tell a busy provider from a broken one.** 429 and 5xx are `RateLimitError` and
+  a `retryable=True` `ProviderError`. A report that calls capacity exhaustion a
+  broken configuration sends the user to edit something that is already right.
+- **A parameter name is not universal.** OpenAI's newer models reject
+  `max_tokens` and name `max_completion_tokens` in the error, while Groq,
+  OpenRouter, llama.cpp and vLLM know only `max_tokens`. The adapter asks: it
+  sends, reads the refusal, and retries once with the spelling that model asked
+  for. Branching on a model id instead would put the knowledge where it goes
+  stale, and a gateway that changes its mind would be caught out by it.
+- **Whatever the provider attaches to a call has to come back with the result.**
+  Gemini signs each function call and refuses a result whose signature did not
+  return, which is the second request failing, not the first. Two things break it
+  if you are careless: reading the field from the wrong level of the response
+  (an empty signature looks exactly like a model that sent none), and an
+  intermediary that rebuilds the call from what it was given. The agent reassembles
+  a call out of `StreamChunk`s, so anything the chunk does not carry is gone by the
+  next turn — carry it there too.
 
 ### Testing it
 

@@ -67,6 +67,41 @@ A conversation is replayed every turn, so a long one grows. Start a new project,
 or close the project, to begin a fresh conversation. The cost of the replay is
 visible in the footer's token count.
 
+**This model models/gemini-2.5-flash is no longer available to new users.**
+
+A retired model, and the provider names its replacement in the error. Take the
+name it gives you, not one from a remembered list — a list of model ids is what
+went stale. The live catalogue is the authority, and for OpenAI-compatible
+providers the cheapest way to read it is to ask: configure the model, run
+`examples/model_check.py --provider <name>`, and the failure names the current
+model. Gemini moved 2.5 to 3.x; 2.5 still answers for some accounts and not for
+others, which is exactly the case a remembered list cannot describe.
+
+**Agent stopped: agent steps limit reached (30 of 30).**
+
+The model asked for tools thirty times without ever answering in words. One step
+is one request plus everything it asked for, so the run could only have ended at
+the limit. The cause is a loop, not a short budget: read the last tool cards in
+the transcript and look for the same call with the same arguments twice. Small
+models are the usual reason — they reach for a tool instead of answering from what
+they were already told — and the fix is in the prompt, not in the limit.
+
+**The model is "unavailable" but everything is configured correctly.**
+
+A provider with no capacity for the moment, or a free tier that is out of shared
+quota, answers 429 or 5xx. The studio reports that as retryable rather than as a
+configuration fault, because there is nothing to edit: the request was right and
+the provider was busy. `examples/model_check.py` separates the two for the same
+reason, and calling it "broken" would send you to fix something already correct.
+
+**A tool the model wants is missing.**
+
+Two different causes with one symptom. The tool is not published: `agent.allow_execute_python`
+is off by default, and `generate_3d_asset` needs a keyed 3D provider. Or the model
+was never offered it: only tools published by a server the studio is connected to
+are listed, so check the MCP server is connected in Settings and that the tool
+appears under `blender.list_tools`.
+
 ## 3D
 
 **"Tripo returned HTTP 403: You don't have enough credit to create this task"**

@@ -157,6 +157,13 @@ def test_the_troubleshooting_document_quotes_messages_that_still_exist() -> None
     assert "STUDIO_AGENT__MAX_STEPS" in text
     assert "ALLOW_PYTHON_EXECUTION" in text
     assert "studio.db" in text
+    assert "is no longer available to new users" in text, "a retired model, quoted as Google words it"
+    # Built the way the window builds it, so the quote cannot drift from the message.
+    from app.core.errors import BudgetExceeded
+
+    reached = BudgetExceeded("agent steps", 30, 30).message
+    assert "agent steps limit reached (30 of 30)" in reached
+    assert reached.splitlines()[0] in text, "the step limit, quoted as the window words it"
     assert DEFAULT_DATA_DIR.name == "blender-ai-studio"
     assert EXECUTE_PYTHON.endswith("execute_python")
     assert FUTURE_IMPORT_TOOL.endswith("import_asset")

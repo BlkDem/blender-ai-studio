@@ -38,7 +38,11 @@ from app.llm.models import ModelInfo, cost_of
 logger = logging.getLogger(__name__)
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta"
-DEFAULT_MODEL = "gemini-2.5-flash"
+#: The ``-latest`` alias, not a numbered one. Google retired 2.5 to new
+#: accounts while it was the current release, and a default that answers
+#: "no longer available" is a default that a fresh install starts broken. The
+#: alias moves with the model, so it cannot go stale the way a number does.
+DEFAULT_MODEL = "gemini-flash-latest"
 
 
 class GeminiProvider(LLMProvider):
@@ -372,7 +376,5 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
     if status >= 500:
         # The provider is out of capacity, not the request. Reported as
         # retryable so it is not read as a configuration to go and fix.
-        return ProviderError(
-            text or f"HTTP {status}", provider=provider, status=status, retryable=True
-        )
+        return ProviderError(text or f"HTTP {status}", provider=provider, status=status, retryable=True)
     return ProviderError(text or f"HTTP {status}", provider=provider, status=status)

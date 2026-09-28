@@ -26,7 +26,7 @@ you:          watch the tool cards appear, and the viewport change
 
 | | |
 |---|---|
-| [Install](#install) · [Connect Blender](#connect-blender) · [Connect a model](#connect-a-model) | getting it running |
+| [Install](#install) · [Connect Blender](#connect-blender) · [Connect a model](#connect-a-model) · [Check what you configured](#check-what-you-configured) | getting it running |
 | [Your first task](#your-first-task) · [What it looks like](#what-it-looks-like) | using it |
 | [The panels](#the-panels) · [3D generation](#3d-generation) · [The vision loop](#the-vision-loop) · [Projects](#projects) · [Benchmark](#benchmark) | what each part does |
 | [Costs and limits](#costs-and-limits) · [Configuration](#configuration) | tuning it |
@@ -103,6 +103,42 @@ the base URL and the model id, and the studio talks to it.
 Keys go to the system keyring when there is one, otherwise to a `0600` file in
 the data directory. They are never written to a project, never logged, never sent
 to a model, and never included in a benchmark log.
+
+A provider that ships configured but without a key — gemini, cerebras, mistral,
+github — is given one without being redefined: click its row in the Models table,
+**Paste** the key, **Save key**. "Add provider" also sets a key, and also replaces
+the whole configuration, so it is the wrong tool for a provider you already have.
+Pasting has its own button because Qt withholds the standard context menu from a
+password field, and typing a key out in full is not an answer.
+
+## Check what you configured
+
+A model that is listed is not a model that works. Ask it, one model at a time:
+
+```bash
+.venv/bin/python examples/model_check.py            # everything configured
+.venv/bin/python examples/model_check.py --provider openai
+```
+
+Four questions per model, because each fails differently:
+
+| Column | Question |
+|---|---|
+| `answers` | does it reply at all? |
+| `tools` | does it call a tool it was offered, by the name it was given? |
+| `goes on` | can it use the tool's answer? |
+| `sees` | does an image survive the round trip? |
+
+`goes on` is the one that is easy to skip and expensive to miss: a provider can
+attach something to a call that has to come back with the result — Gemini signs
+each function call and refuses a result whose signature did not — and a model can
+call tools perfectly while being unable to continue.
+
+`unavailable` is not `broken`. A provider with no capacity, or one holding your
+account to a quota, is not a configuration to go and fix, and the script says
+which of the two it found. A model the provider has retired says so and names
+its replacement; check the live catalogue rather than a remembered list, because
+that list is what went stale in the first place.
 
 ## Your first task
 
@@ -362,6 +398,14 @@ A run that reaches a limit stops with a reason in the transcript and a
 cost report that omits the expensive request is the one report that cannot be
 trusted.
 
+A **step** is one request to the model plus everything it asked for in that
+reply, so `agent steps limit reached (30 of 30)` means the model asked for tools
+thirty times and never answered in words. The limit is a backstop, not a
+diagnosis: raising it buys more of a loop. What to look for is the last few tool
+cards in the transcript — a model that keeps asking the same question with the
+same arguments is not working, and the window should say so rather than count to
+thirty.
+
 ## Configuration
 
 Defaults, then `.env`/environment (`STUDIO_*`), then the database where the GUI
@@ -477,6 +521,8 @@ python examples/live_run.py \
 - [x] Multiple MCP servers, editable by name in the window
 - [ ] `blender.import_asset`, so a generated asset lands in the scene without
   `execute_python` — the importer prefers it the moment it exists
+- [ ] Say "you already asked for that" when a model repeats a tool call with the
+  same arguments, instead of counting to the step limit and stopping there
 - [ ] More 3D providers behind the same interface
 - [ ] Project files: a project remembers its scene, but does not yet save one
 

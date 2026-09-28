@@ -66,9 +66,13 @@ question unit tests cannot.
 | `pipeline_run.py` | The 3D path with a provider that always succeeds, so the pipeline is not confounded with a billing refusal |
 | `gui_shot.py` | What does a person actually see, with real events |
 | `live_run.py` | Everything at once, in seven sections |
+| `model_check.py` | Which configured models actually work, one by one? |
 
-All of them take `--blender-mcp`, `--python` and `--port`; run `--help` on any of
-them. `asset_run.py` and `pipeline_run.py` open the import gate themselves, since
+All of them but `model_check.py` take `--blender-mcp`, `--python` and `--port`; run
+`--help` on any of them. `model_check.py` is the exception and says so in its own
+help: it never talks to Blender, because a model that fails there fails in a
+session for the same reason, and reaching Blender to find out would confound the
+answer. `asset_run.py` and `pipeline_run.py` open the import gate themselves, since
 importing is the point of what they are testing. `live_run.py` does not: it leaves
 the gate closed unless you pass `--allow-execute-python`, so a run can also prove
 the refusal is a good one.

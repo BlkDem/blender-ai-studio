@@ -562,16 +562,31 @@ def test_a_gemini_thought_signature_survives_the_round_trip() -> None:
 
 
 def test_a_call_without_a_signature_is_sent_without_one() -> None:
-    """An older model sends no signature; inventing one would be a lie."""
+    """A model that sent no signature gets none invented; a made-up one is a
+    value the provider would reject on the next turn."""
     from app.llm.providers.gemini import GeminiProvider
 
     payload = GeminiProvider(api_key="k")._payload(
         ChatRequest(
             messages=[Message.assistant("", [ToolCall.new("t", {})])],
-            model="gemini-2.5-flash",
+            model="gemini-flash-latest",
         )
     )
     assert "thoughtSignature" not in payload["contents"][0]["parts"][0]["functionCall"]
+
+
+def test_the_default_gemini_model_is_an_alias_rather_than_a_number() -> None:
+    """Google retired 2.5 to new accounts while it was the current release.
+
+    A default pinned to a number is therefore a default that stops working for
+    everyone who installs after the next release, and the failure arrives as a
+    provider error rather than as anything to do with the studio.
+    """
+    from app.llm.providers.gemini import DEFAULT_MODEL
+
+    assert DEFAULT_MODEL.endswith("-latest"), (
+        f"the default is pinned to {DEFAULT_MODEL!r}, which goes stale on its own"
+    )
 
 
 def test_gemini_leaves_the_calling_mode_to_google_when_it_is_not_pinned() -> None:
