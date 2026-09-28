@@ -112,7 +112,7 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [_to_wire(message) for message in request.messages],
+            "messages": [_to_wire(message, names) for message in request.messages],
             "stream": stream,
         }
         if request.temperature is not None:
@@ -306,7 +306,7 @@ _OPENAI_CATALOG = [
 # --- wire format ------------------------------------------------------------
 
 
-def _to_wire(message: Message) -> dict[str, Any]:
+def _to_wire(message: Message, names: ToolNameMap | None = None) -> dict[str, Any]:
     """One message into OpenAI's shape.
 
     A tool result is its own message with ``tool_call_id``; an assistant message
@@ -320,6 +320,10 @@ def _to_wire(message: Message) -> dict[str, Any]:
             "content": message.content,
         }
     if message.role is Role.ASSISTANT and message.tool_calls:
+        # The assistant turn is replayed on the next request, so its tool names
+        # have to be translated too. Declaring the tools correctly is not enough:
+        # OpenAI validates the name again inside messages[n].tool_calls, and
+        # answers a dotted one with the same 400 that started this.
         payload: dict[str, Any] = {
             "role": "assistant",
             "content": message.content or None,
@@ -327,7 +331,10 @@ def _to_wire(message: Message) -> dict[str, Any]:
                 {
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments_text()},
+                    "function": {
+                        "name": names.to_wire(call.name) if names else call.name,
+                        "arguments": call.arguments_text(),
+                    },
                 }
                 for call in message.tool_calls
             ],

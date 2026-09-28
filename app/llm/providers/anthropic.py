@@ -100,7 +100,7 @@ class AnthropicProvider(LLMProvider):
     def _payload(
         self, request: ChatRequest, *, stream: bool, names: ToolNameMap | None = None
     ) -> dict[str, Any]:
-        system, messages = _to_wire(request.messages)
+        system, messages = _to_wire(request.messages, names)
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": messages,
@@ -276,7 +276,7 @@ def _image_block(part: Any) -> dict[str, Any]:
     }
 
 
-def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
+def _to_wire(messages: list[Message], names: ToolNameMap | None = None) -> tuple[str, list[dict[str, Any]]]:
     """Into (system, messages).
 
     Consecutive tool results are merged into one user message: the API rejects
@@ -319,7 +319,14 @@ def _to_wire(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
             if message.content:
                 blocks.append({"type": "text", "text": message.content})
             blocks.extend(
-                {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
+                {
+                    "type": "tool_use",
+                    "id": call.id,
+                    # Translated for the same reason as the tool declaration:
+                    # this turn is replayed, and the name is validated again.
+                    "name": names.to_wire(call.name) if names else call.name,
+                    "input": call.arguments,
+                }
                 for call in message.tool_calls
             )
             wire.append({"role": "assistant", "content": blocks})

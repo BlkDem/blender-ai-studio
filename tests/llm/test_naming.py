@@ -175,3 +175,57 @@ def test_the_anthropic_wire_carries_the_translation_too() -> None:
         names,
     )
     assert [call.name for call in answer.tool_calls] == ["blender.create_object"]
+
+
+def test_the_assistant_turn_is_translated_when_it_is_replayed() -> None:
+    """The bug this whole thing is about, in the form it actually bites.
+
+    Declaring the tools correctly is not enough. The assistant turn goes back out
+    on the *next* request inside messages[n].tool_calls, and OpenAI validates
+    the name there too -- so a dotted name there is answered with
+
+        Invalid 'messages[2].tool_calls[0].function.name'
+
+    and the run dies on the second step of every conversation.
+    """
+    from app.llm.base import ToolCall
+    from app.llm.providers.openai_compatible import _to_wire
+
+    call = ToolCall.new("blender.create_object", {"type": "cylinder"})
+    assistant = Message.assistant("Creating it.", tool_calls=[call])
+    names = ToolNameMap(["blender.create_object"])
+
+    wire = _to_wire(assistant, names)
+    assert wire["tool_calls"][0]["function"]["name"] == "blender_create_object"
+    assert "blender.create_object" not in str(wire), "a dotted name anywhere is a 400"
+
+
+def test_a_whole_second_turn_is_free_of_dotted_names() -> None:
+    """The shape that produced the report: system, user, assistant-with-tool,
+    tool result -- sent again."""
+    from app.llm.base import Role, ToolCall
+    from app.llm.providers.openai_compatible import _to_wire
+
+    call = ToolCall.new("blender.create_object", {"type": "cylinder"})
+    conversation = [
+        Message.system("you drive Blender"),
+        Message.user("make a cylinder"),
+        Message.assistant(tool_calls=[call]),
+        Message(role=Role.TOOL, content='{"name": "Cylinder"}', tool_call_id=call.id, name=call.name),
+    ]
+    names = ToolNameMap(["blender.create_object"])
+    payload = [_to_wire(message, names) for message in conversation]
+    for message in payload:
+        for entry in message.get("tool_calls") or []:
+            assert SAFE_NAME.match(entry["function"]["name"])
+
+
+def test_the_anthropic_assistant_turn_is_translated_too() -> None:
+    from app.llm.base import ToolCall
+    from app.llm.providers.anthropic import _to_wire
+
+    call = ToolCall.new("blender.create_object", {"type": "cylinder"})
+    _system, wire = _to_wire([Message.assistant(tool_calls=[call])], ToolNameMap(["blender.create_object"]))
+    block = wire[0]["content"][0]
+    assert block["type"] == "tool_use"
+    assert block["name"] == "blender_create_object"
