@@ -210,6 +210,8 @@ class MainWindow(QMainWindow):
         self.benchmark.review_requested.connect(self._save_review)
         self.projects.create_requested.connect(self._create_project)
         self.projects.opened.connect(self._open_project)
+        self.projects.opened_in_chat.connect(self._open_project_in_chat)
+        self.projects.chat_requested.connect(self._go_to_chat)
         self.projects.closed.connect(self._close_project)
         self.projects.delete_requested.connect(self._delete_project)
         self.projects.blend_requested.connect(self._load_project_blend)
@@ -341,12 +343,25 @@ class MainWindow(QMainWindow):
     def _open_project(self, project_id: str) -> None:
         self.core.submit(self._fetch_project(project_id), self._project_fetched)
 
+    def _open_project_in_chat(self, project_id: str) -> None:
+        """A double-clicked project: opened, and then followed to the chat.
+
+        The page changes when the project is actually open, not when it was
+        asked for. Switching on the click would put the previous project's
+        transcript on screen for as long as the read takes, and the user would
+        have started typing into it.
+        """
+        self.core.submit(
+            self._fetch_project(project_id),
+            lambda project: self._project_fetched(project, to_chat=True),
+        )
+
     async def _fetch_project(self, project_id: str) -> Any:
         if self.context.studio is None:
             return None
         return await self.context.studio.projects.get(project_id)
 
-    def _project_fetched(self, project: Any, *, opening: bool = True) -> None:
+    def _project_fetched(self, project: Any, *, opening: bool = True, to_chat: bool = False) -> None:
         if project is None:
             self.chat.add_note("That project is not there any more.", role="error")
             self._load_projects()
@@ -354,6 +369,17 @@ class MainWindow(QMainWindow):
         self._adopt_project(project)
         if opening:
             self._restore_conversation()
+        if to_chat:
+            self._go_to_chat()
+
+    def _go_to_chat(self) -> None:
+        """Leave the Projects page, keeping the sidebar's row with it.
+
+        Not a switch on the stacked widget: that would show the chat while the
+        list beside it still says you are on Projects, and the two disagreeing
+        about where you are is worse than either being on its own.
+        """
+        self.nav.setCurrentRow(PAGES.index("Chat"))
 
     def _close_project(self) -> None:
         self.context.current_project = None
@@ -422,7 +448,10 @@ class MainWindow(QMainWindow):
             # What to do next, not a statement of what just happened. Creating a
             # project and being left staring at the Projects page, with nothing
             # saying that the work happens somewhere else, is how a finished
-            # setup reads as a finished session.
+            # setup reads as a finished session. The note names the way out --
+            # and there is a button on the Projects page called exactly that, so
+            # the sentence is an instruction someone can follow rather than a
+            # place they have to go and look for.
             self.chat.add_note(
                 f"Project '{project.name}' is open{detail} — it is shown at the bottom of the "
                 "window. Go to Chat and say what you want built; every turn from here is filed "

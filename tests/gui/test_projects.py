@@ -393,6 +393,82 @@ async def test_creating_a_project_says_what_to_do_next(window, qapp) -> None:
     assert "filed" in text
 
 
+async def test_the_note_names_a_button_that_is_there(window, qapp) -> None:
+    """Saying "Go to Chat" and having nothing called that is a dead end. The
+    window does not move on its own, so the way out has to be pressable."""
+    await create_through_the_panel(window, qapp, "Kitchen")
+    assert window.projects.chat_button.text() == "Go to Chat"
+
+
+async def test_the_go_to_chat_button_leaves_the_projects_page(window, qapp) -> None:
+    """The button and the sidebar row have to agree, or the window is showing
+    one page while the list beside it says you are on another."""
+    from app.gui.main_window import PAGES
+
+    await create_through_the_panel(window, qapp, "Kitchen")
+    window.nav.setCurrentRow(PAGES.index("Projects"))
+    qapp.processEvents()
+
+    window.projects.chat_button.click()
+    qapp.processEvents()
+    assert window.nav.currentRow() == PAGES.index("Chat")
+    assert window.pages.currentWidget() is window.chat
+
+
+async def test_double_clicking_a_project_opens_it_and_goes_to_the_chat(window, qapp) -> None:
+    """The double-click is the gesture people use on a file to start working.
+
+    It has to be driven as a double-click rather than by calling the handler:
+    a wiring mistake in the list is exactly the bug being looked for, and a
+    test that emits the signal itself would pass with the connection removed.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    balcony = await create_through_the_panel(window, qapp, "Balcony")
+    await create_through_the_panel(window, qapp, "Kitchen")
+    # The page has to be on screen: Qt drops mouse events for a widget that is
+    # not visible, and the double-click would simply never arrive.
+    window.nav.setCurrentRow(3)
+    row = _row_of(window, balcony)
+    window.projects.list.setCurrentRow(row)
+    qapp.processEvents()
+
+    list_ = window.projects.list
+    point = list_.visualItemRect(list_.item(row)).center()
+    # Click, then double-click, because that is the gesture: a double-click
+    # with no click in front of it is not one to Qt, which is why the press it
+    # needs arrives by itself.
+    QTest.mouseClick(
+        list_.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
+    )
+    QTest.mouseDClick(
+        list_.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point
+    )
+    await pump(qapp, lambda: window.context.current_project == balcony)
+
+    assert window.context.project_name == "Balcony"
+    assert window.nav.currentRow() == 0
+    assert window.pages.currentWidget() is window.chat
+
+
+async def test_the_open_button_still_keeps_you_on_the_projects_page(window, qapp) -> None:
+    """Two ways to open, two meanings: the button picks the project, the
+    double-click starts working in it. If the button also moved the page, there
+    would be no way back to the list without the sidebar."""
+    balcony = await create_through_the_panel(window, qapp, "Balcony")
+    await create_through_the_panel(window, qapp, "Kitchen")
+    window.nav.setCurrentRow(3)
+    qapp.processEvents()
+
+    window.projects.list.setCurrentRow(_row_of(window, balcony))
+    window.projects.open_button.click()
+    await pump(qapp, lambda: window.context.current_project == balcony)
+
+    assert window.nav.currentRow() == 3
+    assert window.pages.currentWidget() is window.projects
+
+
 async def test_creating_a_project_without_a_model_says_so(window, qapp) -> None:
     """A project you cannot run in is a dead end, and the first sign of it is
     Send doing nothing. Said at the moment the project is set up instead."""

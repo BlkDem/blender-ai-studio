@@ -35,6 +35,12 @@ class ProjectsPanel(QWidget):
 
     create_requested = Signal(str, str)  # name, starting .blend
     opened = Signal(str)  # project id
+    #: The same, but the window should end up in the chat afterwards. A
+    #: double-click is the gesture people use on a file to start working, and
+    #: making it only pick the project is what the button beside it is for.
+    opened_in_chat = Signal(str)  # project id
+    #: Where the work happens, asked for without touching any project.
+    chat_requested = Signal()
     closed = Signal()
     delete_requested = Signal(str)  # project id
     blend_requested = Signal(str, str)  # project id, path
@@ -65,6 +71,12 @@ class ProjectsPanel(QWidget):
             "Start a project. It takes over the model, the file and the transcript."
         )
         self.create_button.clicked.connect(self._create_requested)
+        self.chat_button = QPushButton("Go to Chat")
+        self.chat_button.setToolTip(
+            "Leave this page. The work happens in the chat, and every turn from "
+            "there is filed under the open project."
+        )
+        self.chat_button.clicked.connect(self.chat_requested.emit)
         self.open_button = QPushButton("Open selected")
         self.open_button.setToolTip("Make this the project: its file, its model, its conversation")
         self.open_button.clicked.connect(self._open_selected)
@@ -84,6 +96,7 @@ class ProjectsPanel(QWidget):
         self.load_button.clicked.connect(self._load_selected_blend)
         for button in (
             self.create_button,
+            self.chat_button,
             self.open_button,
             self.rename_button,
             self.delete_button,
@@ -97,7 +110,7 @@ class ProjectsPanel(QWidget):
         self.list = QListWidget()
         self.list.setObjectName("projects-list")
         self.list.currentItemChanged.connect(self._selection_changed)
-        self.list.itemDoubleClicked.connect(lambda _item: self._open_selected())
+        self.list.itemDoubleClicked.connect(lambda _item: self._open_in_chat())
         layout.addWidget(self.list, 1)
 
         self._names: dict[str, str] = {}
@@ -183,6 +196,17 @@ class ProjectsPanel(QWidget):
         project_id = self.selected_id()
         if project_id:
             self.opened.emit(project_id)
+
+    def _open_in_chat(self) -> None:
+        """A double-click opens the project *and* goes to where the work happens.
+
+        Opening alone leaves the user on the page they were already on, holding
+        a project they now have to go and use. That is what the button beside it
+        is for, so this is deliberately the other gesture: open, and be there.
+        """
+        project_id = self.selected_id()
+        if project_id:
+            self.opened_in_chat.emit(project_id)
 
     def _delete_selected(self) -> None:
         project_id = self.selected_id()

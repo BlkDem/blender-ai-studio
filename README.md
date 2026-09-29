@@ -249,7 +249,7 @@ app/
 | **Chat** | The conversation, streamed, with a card per tool call: arguments, duration, success, images. Stop any time. |
 | **Scene** | What Blender is showing — connection, scene, object count, active object, camera, engine, frame — read over MCP like everything else. |
 | **Tasks** | Background work: provider, status, progress, duration, credits, cost. Cancel from here, and it is restored from the database on the next launch. |
-| **Projects** | Workspaces. Opening one gives you its file, its model and its transcript, and everything after that is filed under it. |
+| **Projects** | Workspaces. Opening one gives you its file, its model and its transcript, and everything after that is filed under it. **Go to Chat** returns to the work, and double-clicking a project opens it and takes you there. |
 | **Benchmark** | Build a suite, run it, read the table, score the results yourself. |
 | **Models** | Providers, keys, capabilities, and the model selector's contents. |
 | **Settings** | Blender's server, the agent's limits, and the budgets. |
@@ -397,6 +397,13 @@ says this session is filed nowhere. The model is told the project's name, so it
 treats what earlier turns in it established as still true instead of re-deriving
 it. Closing a project steps out of all of it; deleting one asks first, because the
 conversations under it go with it and cannot be brought back.
+
+Setting a project up is not the same as working in it, and the window says so
+rather than moving you on its own. The **Projects** page stays where it is, with
+two ways out: **Go to Chat**, which is the button the note in the transcript names,
+and double-clicking a project, which opens it and takes you there in one gesture.
+**Open selected** deliberately does neither of those — it makes the project current
+and leaves you in the list, because sometimes that is the whole job.
 
 Projects live under `STUDIO_DEFAULT_PROJECT_DIR`, and their working files under
 `data/projects/` when that is unset.
