@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from app.core.errors import AuthenticationError, ProviderError, RateLimitError
+from app.core.errors import AuthenticationError, ProviderError, RateLimitError, upstream_detail
 from app.llm.base import (
     ChatRequest,
     ChatResponse,
@@ -504,6 +504,7 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
     only useful part.
     """
     text = ""
+    error: Any = None
     try:
         payload = json.loads(body)
         error = payload.get("error", payload)
@@ -514,7 +515,11 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
     if status in (401, 403):
         return AuthenticationError(provider, text or "The provider rejected the API key")
     if status == 429:
-        return RateLimitError(provider)
+        # The provider's own text, and OpenRouter's ``metadata.raw`` when the
+        # top-level message is the useless "Provider returned error": a gateway
+        # in front of a free model keeps the actual reason -- that the upstream
+        # is busy, or that your own key buys a separate quota -- one level down.
+        return RateLimitError(provider, message=upstream_detail(error) or text)
     if status >= 500:
         return ProviderError(
             text or f"HTTP {status}",

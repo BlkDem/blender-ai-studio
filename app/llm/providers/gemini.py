@@ -21,7 +21,12 @@ from typing import Any
 
 import httpx
 
-from app.core.errors import AuthenticationError, ProviderError, RateLimitError
+from app.core.errors import (
+    AuthenticationError,
+    ProviderError,
+    RateLimitError,
+    upstream_detail,
+)
 from app.llm.base import (
     ChatRequest,
     ChatResponse,
@@ -361,6 +366,7 @@ def _json_line(data: str) -> dict[str, Any] | None:
 
 def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
     text = ""
+    error: Any = None
     try:
         payload = json.loads(body)
         error = payload.get("error", payload)
@@ -372,7 +378,7 @@ def _error_for(provider: str, status: int, body: bytes) -> ProviderError:
     if status in (401, 403):
         return AuthenticationError(provider, text or "The provider rejected the API key")
     if status == 429:
-        return RateLimitError(provider)
+        return RateLimitError(provider, message=upstream_detail(error) or text)
     if status >= 500:
         # The provider is out of capacity, not the request. Reported as
         # retryable so it is not read as a configuration to go and fix.

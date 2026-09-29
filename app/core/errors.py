@@ -67,14 +67,45 @@ class AuthenticationError(ProviderError):
 class RateLimitError(ProviderError):
     code = "PROVIDER_RATE_LIMIT"
 
-    def __init__(self, provider: str, retry_after: float | None = None) -> None:
+    def __init__(
+        self, provider: str, retry_after: float | None = None, message: str = ""
+    ) -> None:
+        # The provider's own explanation is kept, and it is the only useful part.
+        # A gateway that fronts a free model answers 429 with the reason -- that
+        # the upstream is busy, or that a key of your own would get you a
+        # separate quota -- and "this client is rate limited" reads as though the
+        # account is the problem. Waiting and paying are the two fixes, and
+        # they are told apart by the text the provider already sent.
         super().__init__(
-            f"{provider} is rate limiting this client",
+            message or f"{provider} is rate limiting this client",
             provider=provider,
             retryable=True,
             retry_after=retry_after,
         )
         self.retry_after = retry_after
+
+
+def upstream_detail(error: Any) -> str:
+    """What a gateway has to say about the failure it passed on.
+
+    OpenRouter and its peers wrap the real failure: the top-level message is
+    "Provider returned error", and the sentence that says whether the upstream
+    is merely busy lives under ``metadata.raw``. That sentence is the whole
+    answer to "why am I being rate limited", so it is worth one level of
+    digging. Returns "" when there is nothing better than what was already
+    said.
+    """
+    if not isinstance(error, dict):
+        return ""
+    metadata = error.get("metadata")
+    raw = metadata.get("raw") if isinstance(metadata, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    # A gateway that forwards HTML or a stack trace has told us nothing that
+    # a person can act on, and the top-level message is better than either.
+    if len(raw) > 400 or raw.lstrip().startswith("<"):
+        return ""
+    return raw.strip()
 
 
 class MCPError(StudioError):

@@ -297,6 +297,69 @@ async def test_the_providers_own_message_is_kept_in_the_error() -> None:
     assert "not found" in excinfo.value.message
 
 
+async def test_a_rate_limit_says_which_one_it_is() -> None:
+    """A 429 is the one status whose message names the fix.
+
+    "This client is rate limited" and "the model you asked for is busy upstream"
+    are the same HTTP status and opposite instructions: one is your account, the
+    other is a free model you should simply try again in a minute. Every
+    provider has its own phrasing, so the message is what tells them apart.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": {"message": "Rate limit reached for gpt-4"}})
+
+    with pytest.raises(RateLimitError) as excinfo:
+        await provider_with(handler).chat(ChatRequest(messages=[], model="gpt-4"))
+    assert "Rate limit reached" in excinfo.value.message, (
+        "the provider's own words are the only thing that says what to do"
+    )
+
+
+async def test_a_gateway_rate_limit_says_what_the_upstream_said() -> None:
+    """OpenRouter wraps the failure and puts the sentence one level down.
+
+    The top-level message is "Provider returned error" for every failure it
+    relays, and the reason -- the free model is busy, your own key would get a
+    separate quota -- is in ``metadata.raw``. Reading only the top level gives
+    every upstream failure the same useless message.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "error": {
+                    "message": "Provider returned error",
+                    "metadata": {
+                        "raw": "google/gemma-4-31b-it:free is temporarily rate-limited "
+                        "upstream. Please retry shortly",
+                        "provider_name": "Google AI Studio",
+                        "is_byok": False,
+                    },
+                }
+            },
+        )
+
+    with pytest.raises(RateLimitError) as excinfo:
+        await provider_with(handler).chat(ChatRequest(messages=[], model="m"))
+    assert "temporarily rate-limited upstream" in excinfo.value.message
+    assert "retry shortly" in excinfo.value.message
+
+
+async def test_a_rate_limit_with_nothing_to_say_still_says_something() -> None:
+    """A body that is not JSON is the case that used to raise out of the error
+    handler, which is a crash instead of an answer."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"<html>gateway timeout</html>")
+
+    with pytest.raises(RateLimitError) as excinfo:
+        await provider_with(handler).chat(ChatRequest(messages=[], model="m"))
+    assert excinfo.value.message
+    assert excinfo.value.retryable, "a rate limit is worth trying again"
+
+
 async def test_a_connection_failure_is_retryable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route to host")
@@ -348,6 +411,20 @@ def anthropic_with(handler: Any) -> AnthropicProvider:
         base_url="https://api.anthropic.com", transport=httpx.MockTransport(handler)
     )
     return provider
+
+
+async def test_anthropic_rate_limits_keep_the_reason() -> None:
+    """The same 429 rule as everywhere else, and the same reason to hold to it:
+    Anthropic's own wording is what says whether to wait or to change plan."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": {"type": "rate_limit_error", "message": "Number of requests exceeded"}}
+        )
+
+    with pytest.raises(RateLimitError) as excinfo:
+        await anthropic_with(handler).chat(ChatRequest(messages=[], model="claude-test"))
+    assert "Number of requests exceeded" in excinfo.value.message
 
 
 def test_the_system_prompt_is_a_top_level_field_for_anthropic() -> None:
@@ -449,6 +526,21 @@ def gemini_with(handler: Any) -> GeminiProvider:
         transport=httpx.MockTransport(handler),
     )
     return provider
+
+
+async def test_gemini_rate_limits_keep_the_reason() -> None:
+    """Gemini answers 429 for a quota as well as for a burst, and the message is
+    the only thing that says which: one is a wait, the other is a billing
+    change."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": {"message": "Resource has been exhausted (e.g. check quota)."}}
+        )
+
+    with pytest.raises(RateLimitError) as excinfo:
+        await gemini_with(handler).chat(ChatRequest(messages=[], model="gemini-test"))
+    assert "exhausted" in excinfo.value.message
 
 
 def test_gemini_uses_system_instruction_and_two_roles() -> None:
