@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QBuffer, Qt, Signal
+from PySide6.QtCore import QBuffer, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -399,6 +399,7 @@ class ChatView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.transcript = QWidget()
         self.transcript.setObjectName("transcript")
@@ -412,7 +413,23 @@ class ChatView(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.transcript)
+        self._scroll_timer = QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._apply_scroll_to_end)
+        self.scroll.verticalScrollBar().rangeChanged.connect(self._scroll_to_end)
         layout.addWidget(self.scroll, 1)
+
+        self.composer = QFrame()
+        self.composer.setObjectName("chat-composer")
+        self.composer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.composer.setStyleSheet(
+            "#chat-composer { border-top: 1px solid palette(mid); "
+            "background: palette(window); }"
+        )
+        composer_layout = QVBoxLayout(self.composer)
+        composer_layout.setContentsMargins(12, 12, 12, 16)
+        composer_layout.setSpacing(8)
+        layout.addWidget(self.composer)
 
         self._attachment_bar = QWidget()
         self._attachment_bar.setObjectName("attachment-bar")
@@ -421,13 +438,16 @@ class ChatView(QWidget):
         self._attachment_layout.setSpacing(6)
         self._attachment_layout.addStretch(1)
         self._attachment_bar.setVisible(False)
-        layout.addWidget(self._attachment_bar)
+        composer_layout.addWidget(self._attachment_bar)
 
         input_row = QHBoxLayout()
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(8)
         self.input = ChatInput()
         self.input.setPlaceholderText("Create a table with four legs…  (drop or paste a picture)")
         self.input.setObjectName("chat-input")
         self.input.returnPressed.connect(self._submit)
+        self.input.textChanged.connect(self._scroll_to_end)
         self.input.image_pasted.connect(self.add_attachment)
         self.input.history_step.connect(self.step_prompt_history)
         self.send = QPushButton("Send")
@@ -441,12 +461,13 @@ class ChatView(QWidget):
         self.stop = QPushButton("Stop")
         self.stop.setEnabled(False)
         self.stop.clicked.connect(self.stop_requested.emit)
-        input_row.addWidget(self.input, 1)
+        composer_layout.addWidget(self.input)
         input_row.addWidget(self.history)
         input_row.addWidget(self.new_chat)
-        input_row.addWidget(self.send)
+        input_row.addStretch(1)
         input_row.addWidget(self.stop)
-        layout.addLayout(input_row)
+        input_row.addWidget(self.send)
+        composer_layout.addLayout(input_row)
 
     # --- attachments -------------------------------------------------------
 
@@ -606,15 +627,18 @@ class ChatView(QWidget):
     def append_stream(self, text: str) -> None:
         if self._streaming is not None:
             self._streaming.append(text)
+            self._scroll_to_end()
 
     def end_stream(self) -> None:
         self._streaming = None
+        self._scroll_to_end()
 
     def add_tool(self, call_id: str, tool: str) -> ToolCallCard:
         card = ToolCallCard(tool)
         card.set_running()
         self._cards[call_id] = card
         self._transcript_layout.insertWidget(self._transcript_layout.count() - 1, card)
+        self._scroll_to_end()
         return card
 
     def finish_tool(
@@ -644,6 +668,7 @@ class ChatView(QWidget):
         label.setStyleSheet(f"color: {ROLE_COLOURS['system'].name()};")
         label.setFont(QFont("", 8))
         self._transcript_layout.insertWidget(self._transcript_layout.count() - 1, label)
+        self._scroll_to_end()
 
     def clear(self) -> None:
         while self._transcript_layout.count() > 1:
@@ -665,9 +690,16 @@ class ChatView(QWidget):
                 lines.append(f"tool: {widget.header.text()}")
         return "\n".join(lines)
 
-    def _scroll_to_end(self) -> None:
+    def _scroll_to_end(self, *_args: Any) -> None:
+        self._scroll_timer.start(0)
+
+    def _apply_scroll_to_end(self) -> None:
+        # A message changes the scrollbar range only after Qt has laid it out.
+        # rangeChanged queues another pass if that happens after this timer.
         bar = self.scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
+        if self._streaming is not None:
+            self._streaming.body.ensureCursorVisible()
 
     def summary(self) -> dict[str, Any]:
         bubbles = 0

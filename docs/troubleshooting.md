@@ -102,7 +102,22 @@ was never offered it: only tools published by a server the studio is connected t
 are listed, so check the MCP server is connected in Settings and that the tool
 appears under `blender.list_tools`.
 
-## 3D
+**"The model says it cannot read the file path I gave it."**
+
+A path in a chat message is only text; it does not grant the model access to the
+file. The studio exposes a read-only `read_text_file` tool for supported UTF-8
+text documents. Tell the model to read the path, or ask it to read the file, and
+it will call that tool before answering. Markdown, plain text, source and common
+configuration files are supported up to 1 MiB per file and 200,000 returned
+characters.
+
+`.blend`, `.glb`, `.gltf`, `.fbx`, `.obj`, `.stl`, and other 3D files are binary
+scene assets, not text documents. The text reader deliberately refuses them;
+inspect or import those through the connected Blender/MCP tools. A Windows path
+and its WSL `/mnt/<drive>/...` equivalent are translated when the corresponding
+file is visible to the studio process. A path on a filesystem that the studio
+cannot see must be moved or mounted first.
+
 
 **"Tripo returned HTTP 403: You don't have enough credit to create this task"**
 

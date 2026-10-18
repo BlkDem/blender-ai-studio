@@ -254,7 +254,19 @@ app/
 | **Models** | Providers, keys, capabilities, and the model selector's contents. |
 | **Settings** | Blender's server, the agent's limits, and the budgets. |
 
-## 3D generation
+## Reading a local document
+
+A path typed into chat is not automatically visible to the model. When the user
+provides a local Markdown, text, source, or configuration path, the agent calls
+the read-only `read_text_file` tool before using its contents. It accepts strict
+UTF-8 files up to 1 MiB and returns at most 200,000 characters. Windows paths and
+WSL `/mnt/<drive>/...` paths are translated when the file is visible to the
+studio process.
+
+Binary scene files such as `.blend`, `.glb`, and `.gltf` are intentionally not
+read as text. Use Blender/MCP scene tools to inspect or import them. The tool
+never writes files, executes file contents, or bypasses Blender permissions.
+
 
 The agent has one tool of its own, `generate_3d_asset`, and it is offered only
 when a 3D provider is enabled *and* has a key — a tool that always fails teaches
@@ -609,6 +621,18 @@ python examples/live_run.py \
   live scene back to it yet, so work is only kept as long as the file survives
 - [ ] Per-project MCP server and metadata, both of which the schema has carried
   since the first migration and nothing has ever written
+
+## Saving Blender files
+
+Use File → Save .blend (`Ctrl+S`) or Save as… (`Ctrl+Shift+S`). Resources
+(textures) are packed by default. See [Saving Blender work](docs/saving-blend.md)
+for permissions, workspace behavior and Windows/WSL paths.
+
+### Interface guides
+
+- [Models, providers and 3D provider editor](docs/models-editor.md)
+- [Saving Blender scenes from chat](docs/agent-blend-save.md)
+- [Ollama connection diagnosis](docs/ollama-connection-diagnosis.md)
 
 ## Licence
 

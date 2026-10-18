@@ -83,6 +83,7 @@ class MCPServerConfig(BaseModel):
 class ThreeDConfig(BaseModel):
     """3D generation settings. The API key is a secret, and lives elsewhere."""
 
+    enabled: bool = False
     provider: str = "tripo"
     model: str = ""
     quality: str = "medium"

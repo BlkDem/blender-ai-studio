@@ -209,7 +209,7 @@ class AppContext:
             model_info=model_info,
             system_prompt=self.settings.agent.system_prompt,
             budget=budget or budget_from(self.settings.agent, self.settings.budgets),
-            local_tools=[*self.assets_tool(), *extra_tools],
+            local_tools=[*self.assets_tool(), *self.blend_save_tools(), *self.file_read_tools(), *extra_tools],
             stream=stream,
             studio=self.studio,
             conversation_id=conversation_id,
@@ -219,6 +219,97 @@ class AppContext:
             history=history,
         )
 
+    def file_read_tools(self) -> list[LocalTool]:
+        """Read user-requested UTF-8 documents without granting filesystem writes."""
+        from app.core.file_access import MAX_RETURN_CHARS, read_text_file
+
+        async def read(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            if set(arguments) - {"path", "max_chars"}:
+                return "Error: only path and max_chars are accepted."
+            path = arguments.get("path")
+            max_chars = arguments.get("max_chars", MAX_RETURN_CHARS)
+            if not isinstance(path, str) or not path.strip() or "\x00" in path:
+                return "Error: provide a non-empty local file path without NUL bytes."
+            if not isinstance(max_chars, int) or isinstance(max_chars, bool):
+                return "Error: max_chars must be an integer."
+            try:
+                file = read_text_file(path, max_chars=max_chars)
+            except (OSError, ValueError) as exc:
+                return f"Error: {exc}"
+            return {
+                "path": str(file.path),
+                "filename": file.filename,
+                "encoding": "utf-8",
+                "byte_count": file.byte_count,
+                "truncated": file.truncated,
+                "text": file.text,
+            }
+
+        return [LocalTool(
+            name="read_text_file",
+            description=(
+                "Read a user-supplied local UTF-8 text document by path. Use this when the user gives "
+                "a path to a Markdown, text, source, or configuration file. Read-only and bounded. "
+                "Do not use it for .blend/.glb/.gltf; inspect Blender scene files through Blender/MCP tools."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path to a supported UTF-8 text file."},
+                    "max_chars": {
+                        "type": "integer", "minimum": 1, "maximum": MAX_RETURN_CHARS,
+                        "default": MAX_RETURN_CHARS,
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            handler=read,
+        )]
+
+    def blend_save_tools(self) -> list[LocalTool]:
+        """Explicit exports leave project workspace bookkeeping to the GUI."""
+        from app.core.blend_save import save_blend
+
+        async def save(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            if not self.settings.agent.allow_execute_python:
+                return "Error: save_blend_file requires agent.allow_execute_python in Settings. No permissions were changed."
+            if self.mcp is None or "blender.execute_python" not in self.mcp.tools():
+                return "Error: blender.execute_python is unavailable. Connect Blender and check the MCP server permission/allowlist; do not bypass its policy."
+            path = arguments.get("path")
+            pack = arguments.get("pack_resources", True)
+            if not isinstance(path, str) or not path.strip() or not path.lower().endswith(".blend") or "\x00" in path:
+                return "Error: provide an explicit path ending in .blend, accessible to Blender. Ask the user for a destination if missing."
+            if not isinstance(pack, bool):
+                return "Error: pack_resources must be a boolean."
+            if set(arguments) - {"path", "pack_resources"}:
+                return "Error: only path and pack_resources are accepted."
+            try:
+                saved = await save_blend(self.mcp, path, pack=pack)
+            except Exception as exc:
+                return f"Error: save_blend_file was not confirmed: {exc}. Do not claim success or retry with libraries.write/open or other file APIs. Check the destination and MCP policy; a timeout may still have written the file."
+            return {"saved": True, "path": saved, "pack_resources": pack, "workspace_updated": False}
+
+        return [LocalTool(
+            name="save_blend_file",
+            description=(
+                "Save the current Blender scene to an explicit .blend destination (may overwrite it). "
+                "Packs resources by default; returns saved=true only after Blender confirms FINISHED and filepath. "
+                "Requires Studio execute_python permission and an available MCP tool. "
+                "Does not open files or change the project's workspace. Ask for a destination if unknown."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Explicit .blend destination on Blender's filesystem."},
+                    "pack_resources": {"type": "boolean", "default": True},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            handler=save,
+        )]
+
     def assets_tool(self) -> list[LocalTool]:
         """``generate_3d_asset``, when a 3D provider is enabled.
 
@@ -226,7 +317,7 @@ class AppContext:
         capability of the studio: the agent asks for an asset, and which service
         makes it is the registry's business.
         """
-        if self.three_d is None or not self.three_d.any_enabled():
+        if not self.settings.three_d.enabled or self.three_d is None or not self.three_d.any_enabled():
             return []
         return [
             three_d_tool(
@@ -367,21 +458,12 @@ def three_d_tool(
 
     return LocalTool(
         name="generate_3d_asset",
-        # The description is the model's only guidance about when to reach for
-        # this, so it names the boundary explicitly. A small model reading
-        # "create a medieval wooden chest" and reaching for blender.create_object
-        # is not a reasoning failure so much as a missing distinction, and the
-        # difference between a specific modelled object and an arrangement of
-        # primitives is the whole reason this tool exists.
         description=(
-            "Generate a real 3D model of a specific object with a 3D generation "
-            "service, from a text description or an image URL.\n"
-            "Use it for any object a studio would have modelled: furniture, "
-            "vehicles, animals, plants, weapons, buildings, props, characters.\n"
-            "Examples: 'a medieval wooden chest', 'a rusty samurai helmet', "
-            "'a dragon' -> this tool.\n"
-            "Use blender.create_object instead for arrangement of primitives: "
-            "'a table with four legs', 'a room', 'a stack of boxes'.\n"
+            "Optional external 3D generation service, potentially consuming paid credits. "
+            "Use only when the user explicitly requests external generation. "
+            "Otherwise model objects directly using Blender MCP tools, including "
+            "procedural mesh modelling when available. "
+            "Accepts a text description or an image URL.\n"
             "Returns a task id: generation takes minutes, runs in the background, "
             "and the asset is imported into the scene afterwards."
         ),

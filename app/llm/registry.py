@@ -187,6 +187,15 @@ class LLMRegistry:
             **options.get("kwargs", {}),
         )
 
+    async def invalidate(self, name: str) -> None:
+        """Rebuild the client on next use after its credentials change."""
+        provider = self._providers.pop(name, None)
+        if provider is not None:
+            try:
+                await provider.close()
+            except Exception:
+                logger.debug("closing %s failed", name, exc_info=True)
+
     def set_provider(self, name: str, provider: LLMProvider) -> None:
         """Use a specific provider instance for a name.
 

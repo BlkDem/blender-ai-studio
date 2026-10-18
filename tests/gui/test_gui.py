@@ -595,6 +595,75 @@ def test_scoring_a_run_needs_a_selected_row(qapp) -> None:
 # --- the window, with a real agent -----------------------------------------
 
 
+async def test_existing_provider_accepts_an_exact_model_id(window, qapp) -> None:
+    panel = window.models
+    panel.providers_table.selectRow(0)
+    provider = panel._selected_provider()
+    before = window.context.llm.config(provider).to_dict()
+    panel.existing_model.setText("custom-model-id")
+    panel.save_existing_model.click()
+    for _ in range(40):
+        qapp.processEvents()
+        await asyncio.sleep(0.01)
+
+    config = window.context.llm.config(provider)
+    assert config.default_model == "custom-model-id"
+    assert config.kind == before["kind"]
+    assert config.base_url == before["base_url"]
+    assert all(entry in config.models for entry in before["models"])
+    assert window.current_model() == "custom-model-id"
+    assert window.current_provider() == provider
+    stored = await window.context.studio.settings.get("llm_providers")
+    assert next(entry for entry in stored if entry["name"] == provider)["default_model"] == "custom-model-id"
+
+
+async def test_added_provider_is_persisted_and_visible(window, qapp) -> None:
+    from app.llm.registry import registry_from_settings
+    from app.storage.secrets import key_name
+
+    panel = window.models
+    panel.provider_name.setText("gateway")
+    panel.provider_kind.setText("openai-compatible")
+    panel.provider_base_url.setText("https://gateway.example/v1")
+    panel.provider_key.setText("sk-test")
+    panel.provider_model.setText("claude-opus-5-5")
+    panel.add_provider.click()
+    for _ in range(40):
+        qapp.processEvents()
+        await asyncio.sleep(0.01)
+
+    config = window.context.llm.config("gateway")
+    assert config is not None
+    assert config.default_model == "claude-opus-5-5"
+    assert config.models[0]["id"] == "claude-opus-5-5"
+    assert window.context.secrets.get(key_name("gateway")) == "sk-test"
+    stored = await window.context.studio.settings.get("llm_providers")
+    assert next(entry for entry in stored if entry["name"] == "gateway") == config.to_dict()
+    assert "sk-test" not in str(stored)
+    restored = registry_from_settings(window.context.settings)
+    assert restored.config("gateway").default_model == "claude-opus-5-5"
+    names = [panel.providers_table.item(row, 0).text() for row in range(panel.providers_table.rowCount())]
+    assert "gateway" in names
+    assert panel.provider_key.text() == ""
+
+
+@pytest.mark.parametrize(
+    ("name", "kind", "url", "model"),
+    [
+        ("scripted", "mock", "", "test"),
+        ("new", "invalid", "", "test"),
+        ("new", "openai-compatible", "", "test"),
+        ("new", "openai-compatible", "not-a-url", "test"),
+        ("new", "openai-compatible", "https://gateway.example/v1", ""),
+    ],
+)
+async def test_invalid_provider_does_not_change_registry(window, name, kind, url, model) -> None:
+    before = [config.to_dict() for config in window.context.llm.configs()]
+    with pytest.raises(ValueError):
+        await window._add_provider(name, kind, url, "", model)
+    assert [config.to_dict() for config in window.context.llm.configs()] == before
+
+
 async def test_a_key_can_be_given_to_a_provider_without_being_redefined(window, qapp) -> None:
     """The key is what was missing; the provider is what works.
 
@@ -672,7 +741,7 @@ def test_every_field_that_holds_a_secret_can_be_pasted_into(qapp) -> None:
         assert field.echoMode().name == "Password", "and still does not show it"
 
 
-def test_the_key_button_saves_for_the_selected_row_and_nowhere_else(qapp) -> None:
+def test_the_key_button_saves_for_the_selected_row_and_nowhere_else(qapp, monkeypatch) -> None:
     panel = ModelsPanel(secrets_backend="file")
     panel.show_providers(
         [{"name": "gemini", "kind": "gemini"}, {"name": "groq", "kind": "openai-compatible"}]
@@ -695,6 +764,9 @@ def test_the_key_button_saves_for_the_selected_row_and_nowhere_else(qapp) -> Non
     panel.providers_table.selectRow(1)
     assert panel.existing_key.text() == ""
 
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
     panel.clear_existing_key.click()
     assert seen[-1] == ("groq", ""), "an empty key clears it, which is the only way to"
 

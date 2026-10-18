@@ -105,6 +105,7 @@ class SettingsPanel(QWidget):
         self.max_3d_credits = QSpinBox()
         self.max_3d_credits.setRange(0, 100000)
         self.max_3d_credits.setValue(200)
+        self.external_3d_enabled = QCheckBox("Enable external 3D generation (Tripo, paid service)")
         self.allow_execute_python = QCheckBox("allow blender.execute_python")
         self.allow_execute_python.setToolTip(
             "Off by default. It is also how a generated 3D asset gets imported."
@@ -124,6 +125,10 @@ class SettingsPanel(QWidget):
                     k, w.value() if not isinstance(w, QLineEdit) else w.text()
                 )
             )
+        self.external_3d_enabled.toggled.connect(
+            lambda checked: self.setting_changed.emit("three_d.enabled", checked)
+        )
+        agent_form.addRow("", self.external_3d_enabled)
         self.allow_execute_python.toggled.connect(
             lambda checked: self.setting_changed.emit("agent.allow_execute_python", checked)
         )
@@ -163,6 +168,11 @@ class SettingsPanel(QWidget):
             self.mcp_cwd.setText(server.cwd or "")
             self.mcp_port.setValue(server.blender_port)
             self.mcp_timeout.setValue(server.connect_timeout)
+        blocked = self.external_3d_enabled.blockSignals(True)
+        try:
+            self.external_3d_enabled.setChecked(settings.three_d.enabled)
+        finally:
+            self.external_3d_enabled.blockSignals(blocked)
         agent = settings.agent
         self.system_prompt.setText(agent.system_prompt)
         self.max_steps.setValue(agent.max_steps)

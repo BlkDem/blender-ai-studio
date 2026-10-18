@@ -24,6 +24,19 @@ from app.providers3d.models import AssetRequest
 from app.providers3d.registry import ThreeDRegistry
 
 
+def test_external_generation_requires_explicit_opt_in() -> None:
+    from app.core.context import AppContext
+    from app.core.settings import Settings
+
+    context = AppContext(settings=Settings())
+    context.three_d = registry_with(MockThreeDProvider())
+    assert context.assets_tool() == []
+    context.settings.three_d.enabled = True
+    assert [tool.name for tool in context.assets_tool()] == ["generate_3d_asset"]
+    context.settings.three_d.enabled = False
+    assert context.assets_tool() == []
+
+
 class ImportMCP:
     """Just enough bridge for the importer: the two tools it asks for."""
 

@@ -133,7 +133,7 @@ class ProjectsPanel(QWidget):
         highlighted = self.selected_id()
         self.list.clear()
         self._names = {p.id: p.name for p in projects}
-        self._blends = {p.id: (p.initial_blend or "") for p in projects}
+        self._blends = {p.id: (p.workspace or p.initial_blend or "") for p in projects}
         for project in projects:
             item = QListWidgetItem(self._row_text(project))
             item.setData(Qt.ItemDataRole.UserRole, project.id)

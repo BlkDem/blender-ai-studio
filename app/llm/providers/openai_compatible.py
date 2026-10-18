@@ -33,6 +33,7 @@ from app.llm.base import (
     Usage,
     ensure_not_empty,
 )
+from app.llm.connection import connection_hint, is_loopback, normalize_local_url
 from app.llm.models import ModelInfo, cost_of
 from app.llm.naming import ToolNameMap
 
@@ -58,8 +59,10 @@ class OpenAICompatibleProvider(LLMProvider):
         models: list[ModelInfo] | None = None,
         timeout: float = 120.0,
         extra_headers: dict[str, str] | None = None,
+        trust_env: bool | None = None,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url or DEFAULT_BASE_URL)
+        super().__init__(api_key=api_key, base_url=normalize_local_url(base_url or DEFAULT_BASE_URL))
+        self.trust_env = not is_loopback(self.base_url) if trust_env is None else trust_env
         self.default_model_id = model
         self.model_catalog = models or [ModelInfo(id=model, provider=self.name)]
         self.timeout = timeout
@@ -102,6 +105,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
+                trust_env=self.trust_env,
                 headers=headers,
                 timeout=httpx.Timeout(self.timeout, read=STREAM_READ_TIMEOUT),
             )
@@ -204,7 +208,10 @@ class OpenAICompatibleProvider(LLMProvider):
                             yield piece
         except httpx.HTTPError as exc:
             raise ProviderError(
-                f"{self.name} request failed: {exc}", provider=self.name, retryable=True
+                f"{self.name} request failed ({type(exc).__name__})",
+                provider=self.name,
+                retryable=True,
+                hint=connection_hint(self.base_url),
             ) from exc
 
         logger.debug("%s stream finished in %.0f ms", self.name, (time.perf_counter() - started) * 1000)
@@ -231,7 +238,10 @@ class OpenAICompatibleProvider(LLMProvider):
             response = await self._http().post(path, json=payload)
         except httpx.HTTPError as exc:
             raise ProviderError(
-                f"{self.name} request failed: {exc}", provider=self.name, retryable=True
+                f"{self.name} request failed ({type(exc).__name__})",
+                provider=self.name,
+                retryable=True,
+                hint=connection_hint(self.base_url),
             ) from exc
         if raise_for_status and response.status_code >= 400:
             raise _error_for(self.name, response.status_code, response.content)

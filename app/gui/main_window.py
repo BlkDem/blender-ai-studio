@@ -24,14 +24,15 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QStackedWidget,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -79,11 +80,14 @@ class MainWindow(QMainWindow):
         self.resize(1280, 820)
         self.setObjectName("main-window")
 
+        self._saving = False
+        self._workspace_busy = False
         self.current_run_id = ""
         self._active_agent: Any = None
         self._agent: Any = None
         self._agent_provider = ""
         self._agent_gate: bool | None = None
+        self._agent_external_3d_enabled: bool | None = None
         self._conversation_id = ""
         #: The restored block, handed to the agent when it is built. Kept here
         #: rather than read from the database per turn so that the agent is still
@@ -163,7 +167,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(body, 1)
         self.setCentralWidget(central)
 
-        self.setStatusBar(QStatusBar())
+        status_bar = self.statusBar()
+        status_bar.setObjectName("studio-statusbar")
+        status_bar.setStyleSheet(
+            "#studio-statusbar { border-top: 1px solid palette(mid); }"
+            "#studio-statusbar::item { border: none; }"
+        )
         self.mcp_status = QLabel("MCP: …")
         self.llm_status = QLabel("LLM: …")
         self.three_d_status = QLabel("3D: …")
@@ -202,6 +211,12 @@ class MainWindow(QMainWindow):
         self.models.model_selected.connect(self._model_selected)
         self.models.save_provider.connect(self._save_provider)
         self.models.set_api_key.connect(self._set_api_key)
+        self.models.save_model.connect(self._save_provider_model)
+        self.models.edit_provider.connect(self._edit_provider)
+        self.models.edit_model.connect(self._edit_model)
+        self.models.remove_provider.connect(self._remove_provider_config)
+        self.models.remove_model.connect(self._remove_model_config)
+        self.models.configure_3d.connect(self._configure_three_d)
         self.settings.setting_changed.connect(self._setting_changed)
         self.settings.mcp_changed.connect(self._mcp_changed)
         self.tasks.cancel_requested.connect(self._cancel_task)
@@ -221,7 +236,87 @@ class MainWindow(QMainWindow):
         quit_action = QAction("Quit", self)
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
-        self.menuBar().addAction(quit_action)
+        file_menu = self.menuBar().addMenu("File")
+        self.save_action = file_menu.addAction("Save .blend")
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.triggered.connect(lambda: self._save_blend(False))
+        self.save_as_action = file_menu.addAction("Save as…")
+        self.save_as_action.setShortcut("Ctrl+Shift+S")
+        self.save_as_action.triggered.connect(lambda: self._save_blend(True))
+        self.pack_resources_action = file_menu.addAction("Pack resources (textures) before saving")
+        self.pack_resources_action.setCheckable(True)
+        self.pack_resources_action.setChecked(True)
+        file_menu.addSeparator()
+        file_menu.addAction(quit_action)
+
+    def _file_busy(self) -> bool:
+        return bool(self._saving or self._workspace_busy or self.chat.busy() or self._active_agent)
+
+    def _save_blend(self, save_as: bool = False) -> None:
+        if self._file_busy():
+            self.chat.add_note("Wait for the current run or file operation before saving.", role="error")
+            return
+        self._saving = True
+        self.projects.setEnabled(False)
+        self.save_action.setEnabled(False)
+        self.save_as_action.setEnabled(False)
+        self.core.submit(self._save_target(), lambda project: self._choose_save(project, save_as))
+
+    async def _save_target(self) -> Any:
+        return await self._fetch_project(self.context.current_project) if self.context.current_project else None
+
+    def _choose_save(self, project: Any, save_as: bool) -> None:
+        path = str(project.workspace or "") if project else ""
+        if save_as or not path:
+            dialog = QFileDialog(self, "Save Blender file")
+            dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+            dialog.setNameFilter("Blender files (*.blend)")
+            dialog.setDefaultSuffix("blend")
+            dialog.selectFile(path or (str(self.context.workspace_path(project)) if project else "untitled.blend"))
+            if not dialog.exec():
+                self._save_finished(("", ""))
+                return
+            path = dialog.selectedFiles()[0]
+            if not path.lower().endswith(".blend"):
+                path += ".blend"
+                if Path(path).exists() and QMessageBox.question(
+                    self, "Replace Blender file?", f"Replace {path}?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                ) != QMessageBox.StandardButton.Yes:
+                    self._save_finished(("", ""))
+                    return
+        self.core.submit(
+            self._do_save_blend(project.id if project else None, path, self.pack_resources_action.isChecked()),
+            self._save_finished,
+        )
+
+    async def _do_save_blend(self, project_id: str | None, path: str, pack: bool) -> tuple[str, str]:
+        from app.core.blend_save import save_blend
+
+        try:
+            if not self.context.settings.agent.allow_execute_python:
+                raise RuntimeError("Saving requires blender.execute_python permission in Settings. No settings were changed.")
+            await save_blend(self.context.mcp, path, pack=pack)
+            if project_id:
+                await self.context.studio.projects.update(project_id, workspace=path)
+            return path, ""
+        except Exception as exc:
+            return "", str(exc)
+
+    def _save_finished(self, outcome: tuple[str, str]) -> None:
+        self._saving = False
+        self.projects.setEnabled(True)
+        self.save_action.setEnabled(True)
+        self.save_as_action.setEnabled(True)
+        path, error = outcome
+        if error:
+            self.chat.add_note(f"Save failed: {error}", role="error")
+        elif path:
+            self.chat.add_note(f"Saved .blend: {path}", role="system")
+            self._load_projects()
+            self._show_project_state()
+            self.refresh_scene()
 
     def connection_dot_label(self) -> QLabel:
         self._connection_label = QLabel("Blender")
@@ -317,6 +412,8 @@ class MainWindow(QMainWindow):
         self.projects.show_projects(projects, self.context.current_project)
 
     def _create_project(self, name: str, blend: str) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         # Read here, on the GUI thread, and pass it in: the model selector is a
         # widget, and the coroutine below does not run here.
         #
@@ -341,9 +438,13 @@ class MainWindow(QMainWindow):
         self._adopt_project(project, created=True)
 
     def _open_project(self, project_id: str) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         self.core.submit(self._fetch_project(project_id), self._project_fetched)
 
     def _open_project_in_chat(self, project_id: str) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         """A double-clicked project: opened, and then followed to the chat.
 
         The page changes when the project is actually open, not when it was
@@ -382,6 +483,8 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(PAGES.index("Chat"))
 
     def _close_project(self) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         self.context.current_project = None
         self.context.project_name = ""
         self._remember_project(None)
@@ -391,6 +494,8 @@ class MainWindow(QMainWindow):
         self.chat.add_note("Project closed. New turns are not filed anywhere.", role="system")
 
     def _delete_project(self, project_id: str) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         self.core.submit(self._do_delete_project(project_id), self._project_deleted)
 
     async def _do_delete_project(self, project_id: str) -> bool:
@@ -420,6 +525,8 @@ class MainWindow(QMainWindow):
             self._show_project_state()
 
     def _load_project_blend(self, project_id: str, _blend: str) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         """The panel's manual "open the file" button.
 
         Opening a project already puts Blender on its file, so this is for the
@@ -435,6 +542,8 @@ class MainWindow(QMainWindow):
         self._open_workspace(project)
 
     def _adopt_project(self, project: Any, *, created: bool = False) -> None:
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         """Make this the project the window is working in."""
         self.context.current_project = project.id
         self.context.project_name = project.name
@@ -525,6 +634,9 @@ class MainWindow(QMainWindow):
         once into the project's own directory; after that the copy *is* the
         project, which is the point of having a workspace at all.
         """
+        if self._saving:
+            return
+        self._workspace_busy = True
         self.core.submit(self._stage_workspace(project), self._workspace_staged)
 
     async def _stage_workspace(self, project: Any) -> tuple[str, str]:
@@ -566,6 +678,7 @@ class MainWindow(QMainWindow):
     def _workspace_staged(self, outcome: tuple[str, str]) -> None:
         from app.benchmark.runner import RESET_COPY_ONLY, RESET_UNVERIFIED
 
+        self._workspace_busy = False
         path, state = outcome
         if state == RESET_UNVERIFIED:
             if path:
@@ -711,12 +824,19 @@ class MainWindow(QMainWindow):
                     "key": key,
                     "models": config.models,
                     "ready": self.context.llm.is_configured(config.name),
+                    "enabled": config.enabled,
+                    "default_model": config.default_model,
+                    "options": config.options,
                 }
             )
         self.models.show_providers(entries)
+        self.models.show_three_d(self.context.settings.three_d.model_dump())
 
     def _models_loaded(self, models: list[dict[str, Any]]) -> None:
-        self.models.show_models(models)
+        editor_models = models
+        if self.context.llm is not None:
+            editor_models = [dict(entry, provider=config.name) for config in self.context.llm.configs() for entry in config.models]
+        self.models.show_models(editor_models)
         block = self.model_selector.blockSignals(True)
         self.model_selector.clear()
         for model in models:
@@ -771,6 +891,8 @@ class MainWindow(QMainWindow):
         if not self.current_provider():
             self.chat.add_note("Choose a model first — the selector at the top is empty.", role="error")
             return
+        if self._saving or self.chat.busy() or self._active_agent:
+            return
         pictures = list(images or [])
         # The gate is the catalogue's, not a guess from the model's name, and it is
         # asked here as well as inside the agent so a picture the model will never
@@ -813,10 +935,12 @@ class MainWindow(QMainWindow):
         not there.
         """
         gate = self.context.settings.agent.allow_execute_python
+        external_3d_enabled = self.context.settings.three_d.enabled
         if (
             self._agent is None
             or self._agent_provider != self.current_provider()
             or self._agent_gate != gate
+            or self._agent_external_3d_enabled != external_3d_enabled
         ):
             self._agent = self.context.agent(
                 self.current_provider(),
@@ -826,6 +950,7 @@ class MainWindow(QMainWindow):
             )
             self._agent_provider = self.current_provider()
             self._agent_gate = gate
+            self._agent_external_3d_enabled = external_3d_enabled
         return self._agent
 
     async def _run_agent(self, text: str, images: list[str] | None = None) -> Any:
@@ -958,6 +1083,9 @@ class MainWindow(QMainWindow):
             self.mcp_status.setText(f"MCP: {payload.get('server', '?')} {payload.get('state', '')}")
 
     def _on_error(self, code: str, message: str) -> None:
+        if self._saving:
+            self._save_finished(("", message))
+        self._workspace_busy = False
         self.chat.add_note(f"{code}: {message}", role="error")
         self.chat.set_busy(False)
 
@@ -1010,39 +1138,249 @@ class MainWindow(QMainWindow):
 
     # --- models and settings ----------------------------------------------
 
-    def _save_provider(self, name: str, kind: str, base_url: str, api_key: str) -> None:
+    def _edit_provider(self, payload: dict[str, Any]) -> None:
+        self.core.submit(self._persist_provider_editor(payload), self._provider_saved)
+
+    async def _persist_provider_editor(self, payload: dict[str, Any]) -> str:
+        from dataclasses import replace
+        from urllib.parse import urlparse
+        from app.llm.registry import PROVIDER_TYPES, ProviderConfig
+        from app.storage.secrets import key_name
+
+        registry = self.context.llm
+        assert registry is not None
+        name = payload["name"].strip()
+        original = payload.get("original", "")
+        existing = registry.config(original) if original else None
+        if not name or (original and (existing is None or name != original)):
+            raise ValueError("Provider name is required; existing names cannot be changed.")
+        if not original and registry.config(name):
+            raise ValueError("This provider already exists. Select its row to update it.")
+        kind, url = payload["kind"], payload["base_url"]
+        if kind not in PROVIDER_TYPES:
+            raise ValueError(f"Unknown provider kind. Choose: {', '.join(PROVIDER_TYPES)}")
+        if kind == "openai-compatible" and not url:
+            raise ValueError("An OpenAI-compatible provider needs a Base URL.")
+        if url and kind != "mock":
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Base URL must be an HTTP or HTTPS URL.")
+        config = replace(existing) if existing else ProviderConfig(name=name)
+        config.kind, config.base_url = kind, url
+        config.enabled = bool(payload["enabled"])
+        config.options = dict(payload["options"])
+        if not existing and payload.get("model_id"):
+            config.models = [{"id": payload["model_id"], "supports_tools": True}]
+        ids = [m["id"] for m in config.models]
+        default = payload.get("default_model", "") or config.default_model
+        if default and default not in ids:
+            raise ValueError("The default model must be in this provider's model list.")
+        config.default_model = default or (ids[0] if ids else "")
+        configs = [config if c.name == name else c for c in registry.configs()]
+        if not existing:
+            configs.append(config)
+        await self._save_setting("llm_providers", [c.to_dict() for c in configs])
+        if payload.get("api_key") and self.context.secrets:
+            self.context.secrets.set(key_name(name), payload["api_key"])
+        await registry.invalidate(name)
+        registry.add(config)
+        return name
+
+    def _edit_model(self, payload: dict[str, Any]) -> None:
+        self.core.submit(self._persist_model_editor(payload), self._provider_model_saved)
+
+    async def _persist_model_editor(self, payload: dict[str, Any], remove: bool = False) -> str:
+        import math
+        from dataclasses import replace
+
+        registry = self.context.llm
+        assert registry is not None
+        provider, model_id = payload["provider"], payload["id"].strip()
+        config = registry.config(provider)
+        if config is None or not model_id:
+            raise ValueError("Select a provider and enter an exact model ID.")
+        original = payload.get("original", "")
+        models = [dict(m) for m in config.models]
+        if original and not any(m["id"] == original for m in models):
+            raise ValueError("The original model no longer exists. Refresh and select it again.")
+        if not remove:
+            if any(m["id"] == model_id and m["id"] != original for m in models):
+                raise ValueError("This model ID already exists for this provider.")
+            if payload["context_window"] <= 0 or any(not math.isfinite(payload[k]) or payload[k] < 0 for k in ("input_price", "output_price")):
+                raise ValueError("Context must be positive and prices finite and nonnegative.")
+            entry = next((dict(m) for m in models if m["id"] == original), {})
+            entry.update({k: payload[k] for k in ("id", "supports_tools", "supports_vision", "context_window", "input_price", "output_price")})
+            if original:
+                models = [entry if m["id"] == original else m for m in models]
+            else:
+                models.append(entry)
+        else:
+            models = [m for m in models if m["id"] != model_id]
+        default = config.default_model
+        if not remove and (payload.get("default") or default == original):
+            default = model_id
+        if default not in [m["id"] for m in models]:
+            default = models[0]["id"] if models else ""
+        updated = replace(config, models=models, default_model=default)
+        await self._save_setting("llm_providers", [(updated if c.name == provider else c).to_dict() for c in registry.configs()])
+        await registry.invalidate(provider)
+        registry.add(updated)
+        chosen = f"{provider}:{default if remove else model_id}" if (default if remove else model_id) and config.enabled else ""
+        if not chosen:
+            available = registry.models()
+            chosen = f"{available[0].provider}:{available[0].id}" if available else ""
+        if self.context.studio is not None:
+            await self.context.studio.settings.set(LAST_MODEL_KEY, chosen)
+        return chosen
+
+    def _remove_model_config(self, provider: str, model_id: str) -> None:
+        self.core.submit(self._persist_model_editor({"provider": provider, "id": model_id, "original": model_id}, remove=True), self._provider_model_saved)
+
+    def _remove_provider_config(self, name: str) -> None:
+        self.core.submit(self._delete_provider_config(name), self._provider_model_saved)
+
+    async def _delete_provider_config(self, name: str) -> str:
+        registry = self.context.llm
+        assert registry is not None
+        await self._save_setting("llm_providers", [c.to_dict() for c in registry.configs() if c.name != name])
+        await registry.invalidate(name)
+        registry.remove(name)
+        chosen = await self._read_last_model()
+        if chosen.startswith(name + ":"):
+            models = registry.models()
+            chosen = f"{models[0].provider}:{models[0].id}" if models else ""
+            if self.context.studio is not None:
+                await self.context.studio.settings.set(LAST_MODEL_KEY, chosen)
+        return chosen
+
+    def _configure_three_d(self, config: dict[str, Any], key: str) -> None:
+        self.core.submit(self._persist_three_d(config, key), self._three_d_saved)
+
+    async def _persist_three_d(self, values: dict[str, Any], key: str) -> str:
+        from app.core.settings import ThreeDConfig
+        from app.providers3d.registry import PROVIDER_TYPES
+        from app.storage.secrets import key_name
+
+        unknown = set(values) - set(ThreeDConfig.model_fields)
+        if unknown:
+            raise ValueError(f"Unknown 3D options: {', '.join(sorted(unknown))}")
+        config = ThreeDConfig.model_validate(values)
+        if config.provider not in PROVIDER_TYPES:
+            raise ValueError(f"Unknown 3D provider. Choose: {', '.join(PROVIDER_TYPES)}")
+        if config.poll_interval <= 0 or config.poll_timeout <= 0 or config.max_credits < 0:
+            raise ValueError("Polling times must be positive; credit limit must be nonnegative.")
+        await self._save_setting("three_d", config.model_dump())
+        if key and self.context.secrets:
+            self.context.secrets.set(key_name(config.provider), key)
+        if self.context.three_d:
+            await self.context.three_d.close_all()
+            self.context.three_d.configure(config)
+            if self.context.secrets:
+                self.context.three_d.use_secrets(self.context.secrets)
+            else:
+                self.context.three_d.provider()
+        return config.provider
+
+    def _three_d_saved(self, name: str) -> None:
+        self.models.show_three_d(self.context.settings.three_d.model_dump())
+        self.models.set_hint(f"3D settings for '{name}' saved. Keys are stored separately.")
+        self._show_three_d_status()
+
+    def _save_provider(self, name: str, kind: str, base_url: str, api_key: str, model_id: str = "") -> None:
         if not name:
             self.chat.add_note("A provider needs a name.", role="error")
             return
-        self.core.submit(self._add_provider(name, kind, base_url, api_key), self._provider_saved)
+        self.core.submit(self._add_provider(name, kind, base_url, api_key, model_id), self._provider_saved)
 
-    async def _add_provider(self, name: str, kind: str, base_url: str, api_key: str) -> str:
-        from app.llm.registry import ProviderConfig
+    async def _add_provider(
+        self, name: str, kind: str, base_url: str, api_key: str, model_id: str = ""
+    ) -> str:
+        from urllib.parse import urlparse
+
+        from app.llm.registry import PROVIDER_TYPES, ProviderConfig
 
         assert self.context.llm is not None
-        if api_key and self.context.secrets is not None:
+        name, kind, base_url, model_id = name.strip(), kind.strip(), base_url.strip(), model_id.strip()
+        if not name:
+            raise ValueError("A provider needs a name.")
+        if self.context.llm.config(name) is not None:
+            raise ValueError(f"Provider '{name}' already exists. Use Save key to update its API key.")
+        if kind not in PROVIDER_TYPES:
+            raise ValueError(f"Unknown provider kind '{kind}'. Use: {', '.join(PROVIDER_TYPES)}")
+        if kind == "openai-compatible" and not base_url:
+            raise ValueError("An OpenAI-compatible provider needs a Base URL.")
+        if base_url:
+            parsed = urlparse(base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Base URL must be an HTTP or HTTPS URL.")
+        if not model_id:
+            raise ValueError("Enter the exact model ID supplied by your provider.")
+        config = ProviderConfig(
+            name=name,
+            kind=kind,
+            base_url=base_url,
+            default_model=model_id,
+            models=[{"id": model_id, "supports_tools": True}],
+        )
+        if api_key.strip() and self.context.secrets is not None:
             from app.storage.secrets import key_name
 
-            self.context.secrets.set(key_name(name), api_key)
-        self.context.llm.add(
-            ProviderConfig(
-                name=name,
-                kind=kind,
-                base_url=base_url,
-                default_model="",
-                models=[{"id": "model-id", "supports_tools": True}],
-            )
-        )
+            self.context.secrets.set(key_name(name), api_key.strip())
+        configs = [entry.to_dict() for entry in self.context.llm.configs()] + [config.to_dict()]
+        await self._save_setting("llm_providers", configs)
+        self.context.llm.add(config)
         return name
 
     def _provider_saved(self, name: str) -> None:
-        self.chat.add_note(f"Provider '{name}' saved. Add its models in the table below.", role="system")
+        self.models.provider_key.clear()
+        self.models.set_hint(f"Provider '{name}' saved.")
+        self.chat.add_note(f"Provider '{name}' saved. Select its model to start chatting.", role="system")
+        self._show_providers()
+        self.core.submit(self._load_models(), self._models_loaded)
+
+    def _save_provider_model(self, provider: str, model_id: str) -> None:
+        if not provider or not model_id.strip():
+            self.models.set_hint("Select a provider and enter its exact Model ID.")
+            return
+        self.core.submit(self._update_provider_model(provider, model_id.strip()), self._provider_model_saved)
+
+    async def _update_provider_model(self, provider: str, model_id: str) -> str:
+        from dataclasses import replace
+
+        assert self.context.llm is not None
+        config = self.context.llm.config(provider)
+        if config is None:
+            raise ValueError(f"No provider named '{provider}'.")
+        model_id = model_id.strip()
+        if not model_id:
+            raise ValueError("Enter the exact Model ID.")
+        models = list(config.models)
+        if not any(entry["id"] == model_id for entry in models):
+            models.append({"id": model_id, "supports_tools": True})
+        updated = replace(config, default_model=model_id, models=models)
+        configs = [
+            (updated if entry.name == provider else entry).to_dict()
+            for entry in self.context.llm.configs()
+        ]
+        await self._save_setting("llm_providers", configs)
+        await self.context.llm.invalidate(provider)
+        self.context.llm.add(updated)
+        chosen = f"{provider}:{model_id}"
+        await self._store_last_model(chosen)
+        return chosen
+
+    def _provider_model_saved(self, chosen: str) -> None:
+        self._last_model = chosen
+        self.models.set_hint(f"Model '{chosen}' saved and selected.")
+        self._show_providers()
         self.core.submit(self._load_models(), self._models_loaded)
 
     def _set_api_key(self, provider: str, api_key: str) -> None:
         if not provider:
             return
-        if self.context.llm is not None and self.context.llm.config(provider) is None:
+        from app.providers3d.registry import PROVIDER_TYPES as THREE_D_TYPES
+
+        if self.context.llm is not None and self.context.llm.config(provider) is None and provider not in THREE_D_TYPES:
             # A key stored under a name nothing is configured for is a trap: it
             # looks saved, and the provider it was meant for stays "no key".
             self.chat.add_note(f"There is no provider called '{provider}'.", role="error")
@@ -1058,6 +1396,8 @@ class MainWindow(QMainWindow):
             self.context.secrets.set(key_name(provider), api_key)
         else:
             self.context.secrets.delete(key_name(provider))
+        if self.context.llm is not None:
+            await self.context.llm.invalidate(provider)
         if self.context.three_d is not None:
             self.context.three_d.use_secrets(self.context.secrets)
             # An unknown provider name raises, and the caller is told so by the
@@ -1067,6 +1407,9 @@ class MainWindow(QMainWindow):
         return provider
 
     def _key_stored(self, provider: str) -> None:
+        self.models.existing_key.clear()
+        self.models.provider_key.clear()
+        self.models.three_d_key.clear()
         self.chat.add_note(f"Key for '{provider}' saved.", role="system")
         # The table still shows the old state, so the column that says "no key"
         # would contradict the note above it until something else refreshed it.

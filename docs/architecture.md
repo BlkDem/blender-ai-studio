@@ -144,6 +144,16 @@ clock, session cost, 3D credits, and one request's cost.
    `blender.import_asset` MCP tool and otherwise uses `blender.execute_python`.
    What arrived is a **scene diff**, not the operator's word for it.
 
+### 6. A path is not file contents
+
+A user can mention a local path in chat, but an LLM cannot read the studio's
+filesystem from that string. `AppContext.file_read_tools()` registers the
+read-only `read_text_file` local tool, which validates a bounded UTF-8 document,
+handles Windows/WSL path candidates, and returns structured text to the agent.
+It never writes, executes, or opens Blender files. Binary scene assets such as
+`.blend` and `.glb` remain on the Blender/MCP side of the boundary and must be
+inspected there.
+
 ## Where the files live
 
 ```text
