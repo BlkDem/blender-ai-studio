@@ -116,7 +116,7 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": request.model,
-            "messages": [_to_wire(message, names) for message in request.messages],
+            "messages": _messages_to_wire(request.messages, names),
             "stream": stream,
         }
         if request.temperature is not None:
@@ -300,6 +300,27 @@ _OPENAI_CATALOG = [
 
 
 # --- wire format ------------------------------------------------------------
+
+
+def _messages_to_wire(messages: list[Message], names: ToolNameMap | None = None) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    pending_images: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is not Role.TOOL and pending_images:
+            result.append({"role": "user", "content": pending_images})
+            pending_images = []
+        result.append(_to_wire(message, names))
+        if message.role is Role.TOOL:
+            images = [part for part in message.parts if part.type == "image"]
+            if images:
+                pending_images.append({"type": "text", "text": f"Images returned by tool call {message.tool_call_id}:"})
+                pending_images.extend(
+                    {"type": "image_url", "image_url": {"url": f"data:{part.mime_type or 'image/png'};base64,{part.data or ''}"}}
+                    for part in images
+                )
+    if pending_images:
+        result.append({"role": "user", "content": pending_images})
+    return result
 
 
 def _to_wire(message: Message, names: ToolNameMap | None = None) -> dict[str, Any]:

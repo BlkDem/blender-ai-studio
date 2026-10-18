@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.cost import Budget, CostTotals, CostTracker
-from app.core.errors import AgentError, BudgetExceeded, MCPError
+from jsonschema import SchemaError, ValidationError, validate
+
+from app.core.errors import AgentError, BudgetExceeded, MCPError, StudioError
 from app.core.events import Event, EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
@@ -286,24 +288,23 @@ class Agent:
         be closed from here -- and a switch in a settings panel that controls
         nothing is worse than no switch, because it is read as a promise.
         """
+        if not getattr(self.cost.price(), "supports_tools", True):
+            return []
         specs = [
             spec
             for spec in self.mcp.tool_specs()
-            if not spec.name.endswith(EXECUTE_PYTHON_SUFFIX) or self.allow_execute_python
+            if not self.refuses(spec.name)
         ]
         known = {spec.name for spec in specs}
-        specs.extend(tool.spec() for tool in self.local_tools if tool.name not in known)
+        specs.extend(
+            tool.spec() for tool in self.local_tools
+            if tool.name not in known and not self.refuses(tool.name)
+        )
         return specs
 
     def refuses(self, name: str) -> bool:
         """Whether a tool the model asked for is one the studio will not run."""
-        if not name.endswith(EXECUTE_PYTHON_SUFFIX):
-            return False
-        if self.allow_execute_python:
-            return False
-        from app.providers3d.importer import FUTURE_IMPORT_TOOL
-
-        return FUTURE_IMPORT_TOOL not in self.mcp.tools()
+        return name.rsplit(".", 1)[-1] == "execute_python" and not self.allow_execute_python
 
     def _local_tool(self, name: str) -> LocalTool | None:
         return next((tool for tool in self.local_tools if tool.name == name), None)
@@ -360,6 +361,7 @@ class Agent:
         if current is not None:
             self._runs[run_id] = current
         self.budget.reset()
+        self._run_start_totals = CostTotals(**{key: getattr(self.cost.totals, key) for key in CostTotals.__dataclass_fields__})
         started = time.perf_counter()
         self._publish(
             run_id,
@@ -381,42 +383,43 @@ class Agent:
             user_message,
         ]
         result.messages = list(messages)
-        if self.studio is not None:
-            self.conversation_id = await self._conversation()
-            await self._store(
-                conversation_id=self.conversation_id, role="user", content=user_text, run_id=run_id
-            )
-
         try:
-            while True:
-                self.budget.check(result.totals)
-                response = await self._one_turn(run_id, messages, result)
-                messages.append(Message.assistant(response.text, response.tool_calls))
-                if self.studio is not None and (response.text or response.tool_calls):
+            async with asyncio.timeout(self.budget.max_seconds):
+                if self.studio is not None:
+                    self.conversation_id = await self._conversation()
                     await self._store(
-                        conversation_id=self.conversation_id,
-                        role="assistant",
-                        content=response.text,
-                        run_id=run_id,
-                        reasoning=response.reasoning,
+                        conversation_id=self.conversation_id, role="user", content=user_text, run_id=run_id
                     )
-                result.steps += 1
-                self.budget.steps += 1
 
-                if not response.tool_calls:
-                    result.text = response.text
-                    result.finished = True
-                    break
+                while True:
+                    self._check_budget(result.totals, step=True)
+                    response = await self._one_turn(run_id, messages, result)
+                    messages.append(Message.assistant(response.text, response.tool_calls))
+                    if self.studio is not None and (response.text or response.tool_calls):
+                        await self._store(
+                            conversation_id=self.conversation_id,
+                            role="assistant",
+                            content=response.text,
+                            run_id=run_id,
+                            reasoning=response.reasoning,
+                        )
+                    result.steps += 1
+                    self.budget.steps += 1
 
-                for call in response.tool_calls:
-                    # Checked per call, not per step: a model that asks for six
-                    # tools in one turn should stop at the fifth, not after the
-                    # whole batch has already run.
-                    self.budget.check_call(result.totals)
-                    tool_result = await self._run_tool(run_id, call, result)
-                    result.tool_calls.append(tool_result)
-                    messages.append(tool_result.message())
-                    result.messages = messages
+                    if not response.tool_calls:
+                        result.text = response.text
+                        result.finished = True
+                        break
+
+                    for call in response.tool_calls:
+                        # Checked per call, not per step: a model that asks for six
+                        # tools in one turn should stop at the fifth, not after the
+                        # whole batch has already run.
+                        self._check_budget(result.totals)
+                        tool_result = await self._run_tool(run_id, call, result)
+                        result.tool_calls.append(tool_result)
+                        messages.append(tool_result.message())
+                        result.messages = messages
         except asyncio.CancelledError:
             self._publish(
                 run_id,
@@ -426,6 +429,13 @@ class Agent:
                 **result.totals.to_dict(),
             )
             raise
+        except TimeoutError:
+            exc = BudgetExceeded("wall-clock seconds", self.budget.elapsed(), self.budget.max_seconds)
+            result.stopped_because = exc.message
+            self._publish(run_id, EventType.RUN_FAILED, reason=exc.code, detail=exc.message,
+                          transaction_open=self._open_transaction, hint=self.transaction_warning(),
+                          **result.totals.to_dict())
+            return result
         except BudgetExceeded as exc:
             result.stopped_because = exc.message
             warning = self.transaction_warning()
@@ -454,13 +464,14 @@ class Agent:
         finally:
             self._runs.pop(run_id, None)
             result.elapsed_s = time.perf_counter() - started
-            result.totals = self.cost.totals
+            result.totals = self._run_totals()
             # Whatever happened, what did happen is the conversation now -- but
             # only if it can be replayed. A run stopped between a tool call and
             # its result leaves an assistant message promising a tool call that
             # never came back, and a provider is entitled to refuse the whole
             # next request over it.
             self._memory = self._replayable(messages[1:])
+            result.messages = list(messages)
 
         self._publish(
             run_id,
@@ -474,6 +485,24 @@ class Agent:
         )
         return result
 
+    def _run_totals(self) -> CostTotals:
+        baseline = getattr(self, "_run_start_totals", CostTotals())
+        return CostTotals(**{
+            key: getattr(self.cost.totals, key) - getattr(baseline, key)
+            for key in CostTotals.__dataclass_fields__
+        })
+
+    def _check_budget(self, totals: CostTotals, *, step: bool = False) -> None:
+        limits = CostTotals(**{
+            key: getattr(totals, key) for key in CostTotals.__dataclass_fields__
+        })
+        limits.llm_usd = self.cost.totals.llm_usd
+        limits.three_d_credits = self.cost.totals.three_d_credits
+        if step:
+            self.budget.check(limits)
+        else:
+            self.budget.check_call(limits)
+
     async def _one_turn(self, run_id: str, messages: list[Message], result: RunResult) -> ChatResponse:
         """One LLM call, streamed or not."""
         request = ChatRequest(
@@ -483,7 +512,7 @@ class Agent:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
-        if not self.stream:
+        if not self.stream or not getattr(self.cost.price(), "supports_streaming", True):
             response = await self.provider.chat(request)
             if response.text:
                 self._publish(run_id, EventType.TEXT, text=response.text)
@@ -548,7 +577,7 @@ class Agent:
         if self.model is not None:
             self.cost.set_model(self.cost.model)
         cost = self.cost.add_usage(response.usage)
-        result.totals = self.cost.totals
+        result.totals = self._run_totals()
         if self.studio is not None:
             # Recorded before the budget is checked: the request has already been
             # billed, and a cost report that omits the expensive one is exactly
@@ -573,37 +602,27 @@ class Agent:
         self._publish(
             run_id, EventType.TOOL_STARTED, tool=call.name, call_id=call.id, arguments=call.arguments
         )
-        if self.refuses(call.name):
-            # Not a tool error the model should retry: it is the studio saying no,
-            # and saying why is more useful than a validation error from the server.
-            from app.core.errors import StudioError
-
-            refusal = StudioError(
-                f"{call.name} is switched off in this studio",
-                hint="Settings -> Agent -> allow blender.execute_python",
-            )
-            refusal.code = "TOOL_DISABLED"
-            refusal_text = refusal.user_text()
-            self._publish(
-                run_id,
-                EventType.TOOL_FAILED,
-                tool=call.name,
-                call_id=call.id,
-                is_error=True,
-                text=refusal_text,
-                images=0,
-                duration_ms=0.0,
-            )
-            return ToolResult(call=call, content=refusal_text, is_error=True, error_code="TOOL_DISABLED")
         local = self._local_tool(call.name)
         error_code = ""
         # A local tool hands back bare image payloads; only an MCP one knows
         # their mime type.
         mime_types: list[str] = []
         try:
+            if self.refuses(call.name):
+                error = StudioError(f"{call.name} is switched off in this studio; enable allow blender.execute_python",
+                                    hint="Settings -> Agent -> allow blender.execute_python")
+                error.code = "TOOL_DISABLED"
+                raise error
+            spec = next((spec for spec in self.tools() if spec.name == call.name), None)
+            if spec is None:
+                error = StudioError(f"No tool named {call.name} is available for this model")
+                error.code = "TOOL_UNAVAILABLE"
+                raise error
+            if not isinstance(call.arguments, dict) or "__raw__" in call.arguments:
+                raise ValueError("Tool arguments must be a valid JSON object")
+            validate(call.arguments, spec.parameters)
             if local is not None:
-                outcome_text, images, credits, usd = await self._run_local(local, call, result)
-                is_error = outcome_text.startswith("Error:")
+                outcome_text, images, credits, usd, is_error, error_code = await self._run_local(local, call, result)
             else:
                 outcome = await self.mcp.call_tool(call.name, call.arguments)
                 outcome_text = outcome.text
@@ -624,10 +643,10 @@ class Agent:
                 credits = usd = 0.0
         except asyncio.CancelledError:
             raise
-        except (StudioError, OSError, ValueError) as exc:
-            outcome_text = f"Error: {exc}"
+        except Exception as exc:
+            outcome_text = f"Error: {exc.user_text() if isinstance(exc, StudioError) else exc}"
             images, credits, usd, is_error = [], 0.0, 0.0, True
-            error_code = getattr(exc, "code", "ERROR")
+            error_code = getattr(exc, "code", "INVALID_ARGUMENTS" if isinstance(exc, (ValueError, ValidationError, SchemaError)) else "ERROR")
 
         body = self._for_model(self._with_recovery_hint(call.name, error_code, outcome_text))
 
@@ -639,10 +658,9 @@ class Agent:
         self._note_transaction(call.name, is_error)
         self.cost.add_tool_call(is_error)
         self.cost.add_3d(credits, usd)
-        result.totals = self.cost.totals
+        result.totals = self._run_totals()
         result.images.extend(images)
 
-        body = self._for_model(self._with_recovery_hint(call.name, error_code, outcome_text))
         # The duration belongs in the event: it is the one number a person
         # watching the transcript cannot work out for themselves, and the card in
         # the chat is where they look for it.
@@ -652,6 +670,7 @@ class Agent:
             tool=call.name,
             call_id=call.id,
             is_error=is_error,
+            error_code=error_code,
             text=body,
             images=len(images),
             image_data=images[:2],
@@ -659,7 +678,7 @@ class Agent:
         )
         self._publish(run_id, EventType.COST, **self.cost.totals.to_dict())
         return ToolResult(
-            call=call, content=body, is_error=is_error, images=self._image_parts(images, mime_types)
+            call=call, content=body, is_error=is_error, error_code=error_code, images=self._image_parts(images, mime_types)
         )
 
     def _image_parts(self, images: list[str], mime_types: list[str]) -> list[ContentPart]:
@@ -697,15 +716,37 @@ class Agent:
         Also bounded: a long session would otherwise grow the prompt without end,
         and the same budget as a resumed block applies.
         """
-        clean = list(messages)
-        while clean and clean[-1].role is Role.ASSISTANT and clean[-1].tool_calls:
-            clean.pop()
+        groups: list[list[Message]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            index += 1
+            if message.role is Role.TOOL:
+                continue
+            group = [message]
+            if message.role is Role.ASSISTANT and message.tool_calls:
+                expected = {call.id for call in message.tool_calls}
+                seen: set[str] = set()
+                valid = len(expected) == len(message.tool_calls)
+                while index < len(messages) and messages[index].role is Role.TOOL:
+                    reply = messages[index]
+                    index += 1
+                    if reply.tool_call_id not in expected or reply.tool_call_id in seen:
+                        valid = False
+                    seen.add(reply.tool_call_id)
+                    group.append(reply)
+                if not valid or seen != expected:
+                    continue
+            groups.append(group)
+        kept: list[list[Message]] = []
         total = 0
-        for index in range(len(clean) - 1, -1, -1):
-            total += len(clean[index].content)
-            if total > RESUME_CHARS * 4:
-                return clean[index + 1 :]
-        return clean
+        for group in reversed(groups):
+            size = sum(len(json.dumps(message.to_dict(), default=str)) for message in group)
+            if total + size > RESUME_CHARS * 4:
+                break
+            kept.append(group)
+            total += size
+        return [message for group in reversed(kept) for message in group]
 
     def _with_recovery_hint(self, tool: str, error_code: str, text: str) -> str:
         """Turn one refusal into a step the model can take.
@@ -752,16 +793,23 @@ class Agent:
 
     async def _run_local(
         self, tool: LocalTool, call: ToolCall, result: RunResult
-    ) -> tuple[str, list[str], float, float]:
+    ) -> tuple[str, list[str], float, float, bool, str]:
         outcome = await tool.handler(call.arguments, run_id=call.id)
+        if isinstance(outcome, ToolResult):
+            return (outcome.content, [part.data for part in outcome.images if part.data],
+                    0.0, 0.0, outcome.is_error, outcome.error_code)
         if isinstance(outcome, dict):
+            error = outcome.get("error")
+            failed = bool(error) or outcome.get("status") in ("failed", "error") or outcome.get("is_error") is True
+            code = outcome.get("error_code") or (error.get("code", "") if isinstance(error, dict) else "")
             return (
                 json.dumps(outcome, ensure_ascii=False, indent=2, default=str),
                 list(outcome.get("images") or []),
                 float(outcome.get("credits") or 0.0),
                 float(outcome.get("cost_usd") or 0.0),
+                failed, str(code or ("TOOL_ERROR" if failed else "")),
             )
-        return (str(outcome), [], 0.0, 0.0)
+        return (str(outcome), [], 0.0, 0.0, str(outcome).startswith("Error:"), "")
 
     def _for_model(self, text: str) -> str:
         """What goes back into the prompt.

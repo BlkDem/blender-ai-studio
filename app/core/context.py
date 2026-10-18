@@ -12,6 +12,7 @@ diagnostic that lies.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -209,7 +210,7 @@ class AppContext:
             model_info=model_info,
             system_prompt=self.settings.agent.system_prompt,
             budget=budget or budget_from(self.settings.agent, self.settings.budgets),
-            local_tools=[*self.assets_tool(), *self.blend_save_tools(), *self.file_read_tools(), *extra_tools],
+            local_tools=[*self.assets_tool(), *self.task_tools(), *self.blend_save_tools(), *self.file_read_tools(), *extra_tools],
             stream=stream,
             studio=self.studio,
             conversation_id=conversation_id,
@@ -218,6 +219,65 @@ class AppContext:
             project_name=self.project_name if chosen else "",
             history=history,
         )
+
+    def task_tools(self) -> list[LocalTool]:
+        """Safe visibility and control for work already started by the studio."""
+        def task_info(task: Any) -> dict[str, Any]:
+            data = task.to_dict()
+            data["active"] = task.active
+            if task.state.value == "succeeded" and task.result is not None:
+                data["result"] = task.result
+            if task.payload:
+                data["artifacts"] = {k: v for k, v in task.payload.items() if k in {"kind", "record_id", "provider_task_id", "prompt", "model"}}
+            return data
+
+        async def get(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            task_id = arguments.get("task_id")
+            task = self.tasks.get(task_id) if self.tasks and isinstance(task_id, str) else None
+            return {"ok": True, "task": task_info(task)} if task else {"ok": False, "error": "task not found", "task_id": task_id}
+
+        async def listing(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            active = arguments.get("active_only", False)
+            if not isinstance(active, bool):
+                return {"ok": False, "error": "active_only must be a boolean"}
+            tasks = self.tasks.tasks(active_only=active) if self.tasks else []
+            return {"ok": True, "tasks": [task_info(t) for t in tasks]}
+
+        async def waiting(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            task_id, timeout = arguments.get("task_id"), arguments.get("timeout_s", 30)
+            if not isinstance(task_id, str) or not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
+                return {"ok": False, "error": "task_id and a finite non-negative timeout_s are required"}
+            if self.tasks is None or self.tasks.get(task_id) is None:
+                return {"ok": False, "error": "task not found", "task_id": task_id}
+            task = await self.tasks.wait(task_id, timeout=min(timeout, 300.0))
+            return {"ok": True, "completed": not task.active, "task": task_info(task)}
+
+        async def cancel(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+            task_id = arguments.get("task_id")
+            if not isinstance(task_id, str) or self.tasks is None or self.tasks.get(task_id) is None:
+                return {"ok": False, "error": "task not found", "task_id": task_id}
+            changed = await self.tasks.cancel(task_id)
+            task = self.tasks.get(task_id)
+            return {"ok": True, "cancel_requested": changed, "task": task_info(task)}
+
+        def checked(handler: Any, allowed: set[str]) -> Any:
+            async def call(arguments: dict[str, Any], *, run_id: str = "") -> Any:
+                if not isinstance(arguments, dict) or set(arguments) - allowed:
+                    return {"ok": False, "error": "Unexpected arguments"}
+                return await handler(arguments, run_id=run_id)
+            return call
+
+        get = checked(get, {"task_id"})
+        listing = checked(listing, {"active_only"})
+        waiting = checked(waiting, {"task_id", "timeout_s"})
+        cancel = checked(cancel, {"task_id"})
+        common = {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": False}
+        return [
+            LocalTool("get_task", "Inspect a background task and its status, progress, errors, costs, and available artifact/result information.", common, get),
+            LocalTool("list_tasks", "List tracked background tasks. Use this to discover task ids; do not start arbitrary code.", {"type": "object", "properties": {"active_only": {"type": "boolean", "default": False}}, "additionalProperties": False}, listing),
+            LocalTool("wait_task", "Wait for a background task using its studio_task_id, not a provider id. Use after asynchronous submission before claiming completion. At most timeout_s seconds (maximum 300); completed=false means it is still working, not failed. Waiting never cancels work. Check task state/errors and imported result before claiming success; do not busy-poll.", {"type": "object", "properties": {"task_id": {"type": "string"}, "timeout_s": {"type": "number", "minimum": 0, "maximum": 300, "default": 30}}, "required": ["task_id"], "additionalProperties": False}, waiting),
+            LocalTool("cancel_task", "Request cancellation of a running background task; inspect the returned state and do not claim cancellation until it is reported.", common, cancel),
+        ]
 
     def file_read_tools(self) -> list[LocalTool]:
         """Read user-requested UTF-8 documents without granting filesystem writes."""

@@ -255,14 +255,46 @@ class ToolCallCard(QFrame):
         self.header.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._layout.addWidget(self.header)
 
+        self.arguments = QLabel()
+        self.arguments.setTextFormat(Qt.TextFormat.PlainText)
+        self.arguments.setWordWrap(True)
+        self.arguments.setFont(QFont("monospace", 9))
+        self.arguments.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.arguments.hide()
+        self._layout.addWidget(self.arguments)
+
+        self._full_text = ""
         self.detail = QLabel()
+        self.detail.setTextFormat(Qt.TextFormat.PlainText)
         self.detail.setWordWrap(True)
         self.detail.setFont(QFont("monospace", 9))
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.detail.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._layout.addWidget(self.detail)
 
-    def set_running(self) -> None:
+        self.expand = QPushButton("Show full result")
+        self.expand.setCheckable(True)
+        self.expand.hide()
+        self._layout.addWidget(self.expand)
+        self.result_text = QTextEdit()
+        self.result_text.setReadOnly(True)
+        self.result_text.setFont(QFont("monospace", 9))
+        self.result_text.setMaximumHeight(300)
+        self.result_text.hide()
+        self._layout.addWidget(self.result_text)
+        self.expand.toggled.connect(self._toggle_result)
+
+    def _toggle_result(self, expanded: bool) -> None:
+        self.result_text.setVisible(expanded)
+        self.expand.setText("Hide full result" if expanded else "Show full result")
+
+    def set_running(self, arguments: Any = None) -> None:
+        if arguments is not None:
+            body = pretty_json(arguments) if isinstance(arguments, str) else json.dumps(
+                arguments, indent=2, ensure_ascii=False
+            )
+            self.arguments.setText(f"Arguments:\n{body}")
+            self.arguments.show()
         self.header.setText(f"🔧 {self.tool}")
         self.header.setStyleSheet(f"color: {ROLE_COLOURS['tool'].name()};")
         self.detail.setText("running…")
@@ -286,7 +318,14 @@ class ToolCallCard(QFrame):
         self.header.setText(f"{mark} {self.tool} · {shown}{suffix}")
         self.header.setStyleSheet(f"color: {colour.name()};")
         body = pretty_json(text)
+        self._full_text = body
         self.detail.setText(elide(body, PREVIEW_CHARS))
+        self.detail.setToolTip(body)
+        self.result_text.setPlainText(body)
+        self.expand.setVisible(len(body) > PREVIEW_CHARS)
+        if len(body) <= PREVIEW_CHARS:
+            self.expand.setChecked(False)
+            self.result_text.hide()
         # A card can be finished more than once, and each finishing brings its own
         # picture. Without this the second render stacks under the first and the
         # card claims to show a result it no longer has.
@@ -307,7 +346,7 @@ class ToolCallCard(QFrame):
         return ImageLabel(data, width=360, tooltip="the render this tool returned")
 
     def full_text(self) -> str:
-        return self.detail.toolTip() or self.detail.text()
+        return self._full_text or self.detail.text()
 
 
 class MessageBubble(QFrame):
@@ -553,6 +592,8 @@ class ChatView(QWidget):
     # --- composing ---------------------------------------------------------
 
     def _submit(self) -> None:
+        if self.busy():
+            return
         text = self.input.text().strip()
         images = self.take_attachments()
         # A picture on its own is a message: "build this" is a turn with no
@@ -587,7 +628,7 @@ class ChatView(QWidget):
         if self._history_index == -1 and direction < 0:
             self._history_draft = self.input.text()
         if direction < 0:
-            self._history_index = min(self._history_index + 1, len(self._prompt_history))
+            self._history_index = min(self._history_index + 1, len(self._prompt_history) - 1)
         else:
             self._history_index = max(self._history_index - 1, -1)
         if self._history_index < 0:
@@ -633,9 +674,15 @@ class ChatView(QWidget):
         self._streaming = None
         self._scroll_to_end()
 
-    def add_tool(self, call_id: str, tool: str) -> ToolCallCard:
+    def add_tool(self, call_id: str, tool: str, arguments: Any = None) -> ToolCallCard:
+        """Add a running tool card.
+
+        ``arguments`` is optional so event producers from older versions remain
+        compatible.  Keep them on the card rather than in a tooltip: tool input
+        is often the most useful part of a transcript when diagnosing a run.
+        """
         card = ToolCallCard(tool)
-        card.set_running()
+        card.set_running(arguments)
         self._cards[call_id] = card
         self._transcript_layout.insertWidget(self._transcript_layout.count() - 1, card)
         self._scroll_to_end()

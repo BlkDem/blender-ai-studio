@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2",
     "pydantic-settings>=2",
     "httpx>=0.27",
+    "jsonschema>=4.23",
     "PySide6-Essentials>=6.6",
 ]
 
