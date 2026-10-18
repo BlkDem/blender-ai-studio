@@ -987,7 +987,8 @@ class MainWindow(QMainWindow):
         agent = self._active_agent
         if agent is not None and self.current_run_id:
             self.core.submit(self._cancel_agent(agent), self._cancelled)
-        self.chat.set_busy(False)
+        elif agent is None:
+            self.chat.set_busy(False)
 
     async def _cancel_agent(self, agent: Any) -> bool:
         return agent.cancel(self.current_run_id)
@@ -1052,7 +1053,8 @@ class MainWindow(QMainWindow):
             call_id = payload.get("call_id", "")
             if call_id and call_id not in self._cards_by_tool:
                 self._cards_by_tool[call_id] = payload.get("tool", "")
-                self.chat.add_tool(call_id, payload.get("tool", ""))
+                self.chat.end_stream()
+                self.chat.add_tool(call_id, payload.get("tool", ""), arguments=payload.get("arguments", {}))
         elif kind in (EventType.TOOL_FINISHED, EventType.TOOL_FAILED):
             call_id = payload.get("call_id", "")
             self.chat.finish_tool(

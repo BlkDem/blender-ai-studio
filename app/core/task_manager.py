@@ -147,6 +147,7 @@ class TaskManager:
         self._publish(EventType.TASK_STARTED, **task.to_dict())
         handle = asyncio.create_task(self._execute(task, work), name=task.id)
         self._handles[task.id] = handle
+        handle.add_done_callback(lambda done: self._handles.pop(task.id, None))
         return task
 
     async def _execute(self, task: Task, work: Callable[[Task], Awaitable[Any]]) -> None:
@@ -203,8 +204,8 @@ class TaskManager:
         handle = self._handles.get(task_id)
         task = self._tasks.get(task_id)
         if handle is not None:
-            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(asyncio.shield(handle), timeout=timeout)
+            # Waiting must never cancel the work, or swallow the caller's cancellation.
+            await asyncio.wait({handle}, timeout=timeout)
         if task is None:
             raise KeyError(task_id)
         return task
@@ -214,6 +215,13 @@ class TaskManager:
         if handle is None or handle.done():
             return False
         handle.cancel()
+        task = self._tasks.get(task_id)
+        if task is not None and task.state == TaskState.QUEUED:
+            task.state = TaskState.CANCELLED
+            task.error = "cancelled"
+            task.finished_at = time.time()
+            await self._persist(task)
+            self._publish(EventType.TASK_FAILED, **task.to_dict())
         return True
 
     async def cancel_all(self) -> None:

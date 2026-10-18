@@ -32,6 +32,7 @@ you:          watch the tool cards appear, and the viewport change
 | [Costs and limits](#costs-and-limits) · [Configuration](#configuration) | tuning it |
 | [Testing](#testing) · [Development](#development) · [Roadmap](#roadmap) | working on it |
 | [docs/architecture.md](docs/architecture.md) | how it fits together, and why |
+| [docs/agent-runtime.md](docs/agent-runtime.md) | tool execution, results, background tasks, and runtime limits |
 | [docs/providers.md](docs/providers.md) | adding a model provider, a 3D provider, a tool |
 | [docs/development.md](docs/development.md) | the daily loop, and the shape of a change |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | the failures that actually happen |
