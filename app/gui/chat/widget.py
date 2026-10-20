@@ -180,7 +180,7 @@ class ImageLabel(QLabel):
         self._data = data
         self.setObjectName("chat-image")
         pixmap = QPixmap()
-        if not pixmap.loadFromData(base64.b64decode(data), "PNG"):
+        if not pixmap.loadFromData(base64.b64decode(data)):
             return
         self.setPixmap(pixmap.scaledToWidth(width, Qt.TransformationMode.SmoothTransformation))
         self.setToolTip(f"{tooltip} — right-click to save")
@@ -489,6 +489,9 @@ class ChatView(QWidget):
         self.input.textChanged.connect(self._scroll_to_end)
         self.input.image_pasted.connect(self.add_attachment)
         self.input.history_step.connect(self.step_prompt_history)
+        self.attach = QPushButton("Attach")
+        self.attach.setToolTip("Attach reference pictures (or drop or paste them)")
+        self.attach.clicked.connect(self.choose_attachments)
         self.send = QPushButton("Send")
         self.send.clicked.connect(self._submit)
         self.history = QPushButton("History")
@@ -503,12 +506,30 @@ class ChatView(QWidget):
         composer_layout.addWidget(self.input)
         input_row.addWidget(self.history)
         input_row.addWidget(self.new_chat)
+        input_row.addWidget(self.attach)
         input_row.addStretch(1)
         input_row.addWidget(self.stop)
         input_row.addWidget(self.send)
         composer_layout.addLayout(input_row)
 
     # --- attachments -------------------------------------------------------
+
+    def choose_attachments(self) -> None:
+        """Stage readable pictures from a multi-file picker, preserving the draft."""
+        if self.busy():
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach pictures", "",
+            "Pictures (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff);;All files (*)",
+        )
+        for path in paths:
+            if self.busy():
+                break
+            data = encode_image(QImage(path))
+            if not data:
+                self.rejected_attachment.emit(f"Not a picture I could read: {Path(path).name}")
+                continue
+            self.add_attachment(data)
 
     def add_attachment(self, data: str) -> bool:
         """Stage one base64 picture for the next turn. True if it was kept.
@@ -551,7 +572,7 @@ class ChatView(QWidget):
         for index, data in enumerate(self._attachments):
             thumb = QLabel()
             pixmap = QPixmap()
-            if pixmap.loadFromData(base64.b64decode(data), "PNG"):
+            if pixmap.loadFromData(base64.b64decode(data)):
                 thumb.setPixmap(pixmap.scaledToWidth(56, Qt.TransformationMode.SmoothTransformation))
             thumb.setToolTip(f"picture {index + 1} of {len(self._attachments)} — sent with the next message")
             self._attachment_layout.addWidget(thumb)
@@ -646,6 +667,7 @@ class ChatView(QWidget):
 
     def set_busy(self, busy: bool) -> None:
         self.send.setEnabled(not busy)
+        self.attach.setEnabled(not busy)
         self.input.setEnabled(not busy)
         self.stop.setEnabled(busy)
 

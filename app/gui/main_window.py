@@ -899,12 +899,58 @@ class MainWindow(QMainWindow):
         # see is reported to the person who attached it. Silently dropping it is
         # how "it ignored my image" gets filed as a model problem.
         if pictures and not self._model_sees_images():
-            self.chat.add_note(
-                f"{self.current_model()} cannot see images — {len(pictures)} attached picture(s) are in the "
-                "transcript but were not sent. Pick a model that declares supports_vision.",
-                role="error",
+            answer = QMessageBox.question(
+                self,
+                "Enable image input?",
+                f"Image input is disabled in the saved settings for {self.current_model()}. "
+                "This does not necessarily mean the model cannot see images.\n\n"
+                "Enable image input for this model and send the attachments? "
+                "Only enable this if your provider supports images.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
             )
-            pictures = []
+            if answer != QMessageBox.StandardButton.Yes:
+                self.chat.input.setText(text)
+                for picture in pictures:
+                    self.chat.add_attachment(picture)
+                return
+            registry = self.context.llm
+            assert registry is not None
+            info = registry.find(self.current_provider(), self.current_model())
+            if info is None:
+                self.chat.add_note("Model metadata is unavailable. Refresh the model list first.", role="error")
+                self.chat.input.setText(text)
+                for picture in pictures:
+                    self.chat.add_attachment(picture)
+                return
+            payload = dict(info.to_dict(), original=info.id, supports_vision=True)
+            chosen_model = self.model_selector.currentData()
+            self.chat.set_busy(True)
+
+            def enabled(result: Any) -> None:
+                self.chat.set_busy(False)
+                if isinstance(result, Exception):
+                    self.chat.add_note(f"Could not enable image input: {result}", role="error")
+                    self.chat.input.setText(text)
+                    for picture in pictures:
+                        self.chat.add_attachment(picture)
+                    return
+                self._agent = None
+                if self.model_selector.currentData() != chosen_model:
+                    self.chat.input.setText(text)
+                    for picture in pictures:
+                        self.chat.add_attachment(picture)
+                    return
+                self.send(text, pictures)
+
+            async def enable_images() -> Any:
+                try:
+                    return await self._persist_model_editor(payload)
+                except Exception as exc:
+                    return exc
+
+            self.core.submit(enable_images(), enabled)
+            return
         self.chat.add_message("user", text, images=pictures)
         self.chat.set_busy(True)
         self._cards_by_tool.clear()

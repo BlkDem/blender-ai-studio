@@ -61,6 +61,12 @@ Only models declared `supports_vision: true` are sent an image — a text-only m
 rejects the request, and the run would die on a capability you never asked about.
 The window still shows the render in the tool card either way.
 
+For image-capable models, enable **Image input** in the model settings. A missing or
+unchecked flag means image input is disabled in Studio, not that the provider has
+reported the model is text-only. Sending an attached picture offers to enable and
+save this setting before sending; cancelling keeps the draft and attachments.
+Use **Attach** in the chat composer to select pictures, or paste/drop them.
+
 **The context fills up after a few turns.**
 
 A conversation is replayed every turn, so a long one grows. Press **New** for a
