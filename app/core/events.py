@@ -35,6 +35,8 @@ class EventType(StrEnum):
     RUN_STARTED = "run_started"
     RUN_FINISHED = "run_finished"
     RUN_FAILED = "run_failed"
+    REQUEST_STARTED = "request_started"
+    REQUEST_RETRY = "request_retry"
     TEXT = "text"
     THINKING = "thinking"
     TOKEN = "token"

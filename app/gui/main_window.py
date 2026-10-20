@@ -15,12 +15,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
@@ -83,6 +84,13 @@ class MainWindow(QMainWindow):
         self._saving = False
         self._workspace_busy = False
         self.current_run_id = ""
+        self._answer_seen = False
+        self._run_failure = ""
+        self._retry_deadline = 0.0
+        self._retry_description = ""
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setInterval(200)
+        self._retry_timer.timeout.connect(self._update_retry_countdown)
         self._active_agent: Any = None
         self._agent: Any = None
         self._agent_provider = ""
@@ -189,6 +197,10 @@ class MainWindow(QMainWindow):
         self.cost_status = QLabel("")
         for label in (self.project_status, self.mcp_status, self.llm_status, self.three_d_status):
             self.statusBar().addWidget(label)
+        self.run_status = QLabel("Run: idle")
+        self.run_status.setObjectName("run-status")
+        self.run_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.statusBar().addPermanentWidget(self.run_status)
         self.statusBar().addPermanentWidget(self.cost_status)
 
         # --- signals --------------------------------------------------------
@@ -952,6 +964,9 @@ class MainWindow(QMainWindow):
             self.core.submit(enable_images(), enabled)
             return
         self.chat.add_message("user", text, images=pictures)
+        self._answer_seen = False
+        self._run_failure = ""
+        self._set_run_status("Waiting for model · Stop available")
         self.chat.set_busy(True)
         self._cards_by_tool.clear()
         # "The last used model" means the one a run actually went to, not the one
@@ -1000,7 +1015,10 @@ class MainWindow(QMainWindow):
         return self._agent
 
     async def _run_agent(self, text: str, images: list[str] | None = None) -> Any:
-        agent = self._agent_for_turn()
+        try:
+            agent = self._agent_for_turn()
+        except Exception as exc:
+            return exc
         # Kept so Stop has something to stop. The agent was built and dropped
         # inside this coroutine, which made the button a no-op that still looked
         # like it worked: the run finished, the UI had already said otherwise.
@@ -1008,12 +1026,41 @@ class MainWindow(QMainWindow):
         parts = [ContentPart.image_part(data, "image/png") for data in images or []]
         try:
             return await agent.run(text, images=parts)
+        except Exception as exc:
+            return exc
         finally:
             self._active_agent = None
 
+    def _set_run_status(self, text: str) -> None:
+        self._retry_timer.stop()
+        self.run_status.setText(f"Run: {text}")
+        self.run_status.setToolTip(text)
+
+    def _update_retry_countdown(self) -> None:
+        remaining = max(0, math.ceil(self._retry_deadline - time.monotonic()))
+        text = f"Retry {self._retry_description.format(seconds=remaining)} · Stop available"
+        self.run_status.setText(f"Run: {text}")
+        self.run_status.setToolTip(text)
+
     def _run_finished(self, result: Any) -> None:
+        if isinstance(result, Exception):
+            self._on_error("RUN_FAILED", str(result))
+            return
+        self.current_run_id = ""
         self.chat.set_busy(False)
         self.chat.end_stream()
+        reason = result.stopped_because or self._run_failure
+        if reason:
+            self._set_run_status("Cancelled" if reason == "cancelled" else f"Failed: {reason}")
+        else:
+            self._set_run_status("Completed")
+        if not self._answer_seen:
+            text = getattr(result, "text", "")
+            if text:
+                self.chat.add_message("assistant", text)
+                self._answer_seen = True
+            elif not reason:
+                self.chat.add_note("Run completed without a text answer.", role="system")
         self.cost_status.setText(
             f"{len(result.tool_calls)} tool call(s) · {result.totals.tokens} tokens · "
             f"{format_money(result.totals.llm_usd)} · {result.elapsed_s:.1f}s"
@@ -1089,13 +1136,43 @@ class MainWindow(QMainWindow):
     def _on_event(self, event: Any) -> None:
         """Every core event, in one place."""
         kind, payload = event.type, event.payload
-        if kind is EventType.TOKEN:
+        value = getattr(kind, "value", str(kind))
+        run_id = payload.get("run_id") or getattr(event, "run_id", "")
+        if run_id and self.current_run_id and run_id != self.current_run_id:
+            if value not in ("status", "task_started", "task_progress", "task_finished", "task_failed"):
+                return
+        if value in ("request_retry", "request_started"):
+            if not self.current_run_id or (run_id and run_id != self.current_run_id):
+                return
+            if value == "request_started":
+                self._set_run_status("Waiting for model · Stop available")
+            else:
+                self._retry_deadline = time.monotonic() + max(0.0, float(payload.get("delay", 0)))
+                reason = str(payload.get("reason", "temporary provider error"))
+                self._retry_description = (
+                    f"{payload.get('attempt', '?')}/{payload.get('max_attempts', '?')} in "
+                    "{seconds}s — " + reason.replace("{", "{{").replace("}", "}}")
+                )
+                self._update_retry_countdown()
+                self._retry_timer.start()
+            return
+        if kind is EventType.TEXT:
+            text = payload.get("text", "")
+            if text:
+                self.chat.end_stream()
+                self.chat.add_message("assistant", text)
+                self._answer_seen = True
+                self._set_run_status("Receiving answer · Stop available")
+        elif kind is EventType.TOKEN:
+            self._answer_seen = self._answer_seen or bool(payload.get("text"))
+            self._set_run_status("Receiving answer · Stop available")
             if not self.chat._streaming:
                 self.chat.start_stream()
             self.chat.append_stream(payload.get("text", ""))
         elif kind is EventType.MESSAGE_COMPLETE:
             self.chat.end_stream()
         elif kind is EventType.TOOL_STARTED and not payload.get("streaming"):
+            self._set_run_status(f"Running tool: {payload.get('tool', '')} · Stop available")
             call_id = payload.get("call_id", "")
             if call_id and call_id not in self._cards_by_tool:
                 self._cards_by_tool[call_id] = payload.get("tool", "")
@@ -1113,8 +1190,17 @@ class MainWindow(QMainWindow):
             )
         elif kind is EventType.RUN_STARTED:
             self.current_run_id = payload.get("run_id", event.run_id)
+            self._set_run_status("Waiting for model · Stop available")
         elif kind in (EventType.RUN_FINISHED, EventType.RUN_FAILED):
             self.current_run_id = ""
+            self.chat.end_stream()
+            self.chat.set_busy(False)
+            if kind is EventType.RUN_FAILED:
+                reason = str(payload.get("detail") or payload.get("reason") or "Unknown error")
+                self._run_failure = reason
+                self._set_run_status("Cancelled" if reason == "cancelled" else f"Failed: {reason}")
+            else:
+                self._set_run_status("Completed")
         elif kind is EventType.USAGE:
             self.cost_status.setText(
                 f"{payload.get('input_tokens', 0)} in / {payload.get('output_tokens', 0)} out · "
@@ -1135,7 +1221,14 @@ class MainWindow(QMainWindow):
             self._save_finished(("", message))
         self._workspace_busy = False
         self.chat.add_note(f"{code}: {message}", role="error")
-        self.chat.set_busy(False)
+        # Generic bridge errors can belong to scene refresh or settings, not the run.
+        if code == "RUN_FAILED" or self._run_failure:
+            self.current_run_id = ""
+            self._active_agent = None
+            self.chat.end_stream()
+            self.chat.set_busy(False)
+            self._run_failure = message
+            self._set_run_status(f"Failed: {message}")
 
     # --- scene -------------------------------------------------------------
 

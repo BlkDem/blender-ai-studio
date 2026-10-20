@@ -67,6 +67,17 @@ reported the model is text-only. Sending an attached picture offers to enable an
 save this setting before sending; cancelling keeps the draft and attachments.
 Use **Attach** in the chat composer to select pictures, or paste/drop them.
 
+**Send becomes available again without an obvious answer.**
+
+The chat status bar shows whether Studio is waiting for the model, receiving an
+answer, running a tool, finished, stopped, or failed. Non-streaming answers are
+also shown in the transcript, and failures include a visible error message.
+Temporary provider failures are retried automatically, up to three attempts,
+with a countdown in the status bar. **Stop** cancels the wait. Authentication and
+other permanent errors are not retried. A request is not automatically replayed
+after partial streamed output, and completed Blender tool actions are never
+replayed by this retry mechanism.
+
 **The context fills up after a few turns.**
 
 A conversation is replayed every turn, so a long one grows. Press **New** for a

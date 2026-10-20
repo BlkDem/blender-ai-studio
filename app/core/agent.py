@@ -27,7 +27,7 @@ from typing import Any
 from app.core.cost import Budget, CostTotals, CostTracker
 from jsonschema import SchemaError, ValidationError, validate
 
-from app.core.errors import AgentError, BudgetExceeded, MCPError, StudioError
+from app.core.errors import AgentError, BudgetExceeded, MCPError, ProviderError, StudioError
 from app.core.events import Event, EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
@@ -39,6 +39,7 @@ from app.llm.base import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    ensure_not_empty,
 )
 from app.llm.models import ModelInfo
 from app.mcp.manager import MCPManager
@@ -449,7 +450,7 @@ class Agent:
                 **result.totals.to_dict(),
             )
             return result
-        except (AgentError, MCPError) as exc:
+        except (AgentError, MCPError, ProviderError) as exc:
             result.stopped_because = exc.user_text()
             self._publish(
                 run_id,
@@ -457,7 +458,7 @@ class Agent:
                 reason=exc.code,
                 detail=exc.message,
                 transaction_open=self._open_transaction,
-                hint=self.transaction_warning(),
+                hint="\n".join(filter(None, (exc.hint, self.transaction_warning()))),
                 **result.totals.to_dict(),
             )
             raise
@@ -504,7 +505,33 @@ class Agent:
             self.budget.check_call(limits)
 
     async def _one_turn(self, run_id: str, messages: list[Message], result: RunResult) -> ChatResponse:
-        """One LLM call, streamed or not."""
+        """Retry only a single request, before any streamed content arrives."""
+        for attempt in range(1, 4):
+            exposed = [False]
+            self._publish(run_id, EventType.REQUEST_STARTED, attempt=attempt, max_attempts=3)
+            try:
+                response = await self._request(run_id, messages, exposed)
+            except ProviderError as exc:
+                if not exc.retryable or exposed[0] or attempt == 3:
+                    raise
+                delay = float(2 ** attempt)
+                retry_after = getattr(exc, "retry_after", exc.details.get("retry_after"))
+                if isinstance(retry_after, (int, float)) and retry_after >= 0:
+                    delay = min(30.0, max(0.1, retry_after))
+                self._publish(
+                    run_id, EventType.REQUEST_RETRY, attempt=attempt + 1,
+                    max_attempts=3, delay=delay, reason=exc.message,
+                )
+                await asyncio.sleep(delay)
+                continue
+            await self._account(run_id, response, result)
+            ensure_not_empty(response, self.provider.name)
+            return response
+        raise AssertionError("unreachable")
+
+    async def _request(
+        self, run_id: str, messages: list[Message], exposed: list[bool]
+    ) -> ChatResponse:
         request = ChatRequest(
             messages=messages,
             model=self.model,
@@ -516,7 +543,6 @@ class Agent:
             response = await self.provider.chat(request)
             if response.text:
                 self._publish(run_id, EventType.TEXT, text=response.text)
-            await self._account(run_id, response, result)
             return response
 
         text: list[str] = []
@@ -528,6 +554,10 @@ class Agent:
         from app.llm.base import Usage
 
         async for chunk in self.provider.stream(request):
+            if chunk.type in ("tool_start", "tool_delta", "tool_end") or (
+                chunk.type in ("text", "reasoning") and chunk.text
+            ):
+                exposed[0] = True
             if chunk.type == "start":
                 continue
             if chunk.type == "text":
@@ -567,7 +597,6 @@ class Agent:
             finish_reason=finish,
             model=self.model,
         )
-        await self._account(run_id, response, result)
         if response.text:
             self._publish(run_id, EventType.MESSAGE_COMPLETE, text=response.text)
         return response

@@ -98,8 +98,9 @@ class CoreThread:
                 # ends up touching a widget.
                 try:
                     arguments[0](*arguments[1:])
-                except Exception:  # noqa: BLE001 - a UI callback must not kill the loop
+                except Exception as exc:  # noqa: BLE001 - a UI callback must not kill the loop
                     logger.exception("a GUI callback failed")
+                    self.signals.error.emit("GUI_CALLBACK_ERROR", str(exc))
 
     def _run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -186,6 +187,8 @@ class CoreThread:
 
     def _deliver(self, future: Any, on_done: Callable[..., None], *args: Any) -> None:
         """Hand a finished coroutine's value to the GUI thread."""
+        if future.cancelled():
+            return
         try:
             value = future.result()
         except asyncio.CancelledError:
@@ -201,7 +204,7 @@ class CoreThread:
             return
         error = future.exception()
         if error is not None:
-            self.signals.error.emit(getattr(error, "code", "ERROR"), str(error))
+            self._inbox.put(("error", (getattr(error, "code", "ERROR"), str(error))))
 
     # --- events into the GUI ---------------------------------------------
 
