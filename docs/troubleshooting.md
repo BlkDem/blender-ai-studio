@@ -72,8 +72,9 @@ Use **Attach** in the chat composer to select pictures, or paste/drop them.
 The chat status bar shows whether Studio is waiting for the model, receiving an
 answer, running a tool, finished, stopped, or failed. Non-streaming answers are
 also shown in the transcript, and failures include a visible error message.
-Temporary provider failures are retried automatically, up to three attempts,
-with a countdown in the status bar. **Stop** cancels the wait. Authentication and
+Temporary provider failures are retried automatically up to ten times after the
+initial request, with delays of 3, 6, 9, …, 30 seconds and a countdown in the status
+bar. A provider's retry-after hint may increase a delay, up to 30 seconds. **Stop** cancels the wait. Authentication and
 other permanent errors are not retried. A request is not automatically replayed
 after partial streamed output, and completed Blender tool actions are never
 replayed by this retry mechanism.

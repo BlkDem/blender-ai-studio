@@ -396,6 +396,7 @@ def ensure_not_empty(response: ChatResponse, provider: str) -> ChatResponse:
         raise ProviderError(
             f"{provider} returned an empty response",
             provider=provider,
+            retryable=True,
             hint="Check the model id, and whether it supports the tools you sent.",
         )
     return response

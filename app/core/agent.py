@@ -506,26 +506,26 @@ class Agent:
 
     async def _one_turn(self, run_id: str, messages: list[Message], result: RunResult) -> ChatResponse:
         """Retry only a single request, before any streamed content arrives."""
-        for attempt in range(1, 4):
+        for attempt in range(1, 12):
             exposed = [False]
-            self._publish(run_id, EventType.REQUEST_STARTED, attempt=attempt, max_attempts=3)
+            self._publish(run_id, EventType.REQUEST_STARTED, attempt=attempt, max_attempts=11)
             try:
                 response = await self._request(run_id, messages, exposed)
+                await self._account(run_id, response, result)
+                ensure_not_empty(response, self.provider.name)
             except ProviderError as exc:
-                if not exc.retryable or exposed[0] or attempt == 3:
+                if not exc.retryable or exposed[0] or attempt == 11:
                     raise
-                delay = float(2 ** attempt)
+                delay = float(min(30, 3 * attempt))
                 retry_after = getattr(exc, "retry_after", exc.details.get("retry_after"))
                 if isinstance(retry_after, (int, float)) and retry_after >= 0:
-                    delay = min(30.0, max(0.1, retry_after))
+                    delay = min(30.0, max(delay, retry_after))
                 self._publish(
                     run_id, EventType.REQUEST_RETRY, attempt=attempt + 1,
-                    max_attempts=3, delay=delay, reason=exc.message,
+                    max_attempts=11, delay=delay, reason=exc.message,
                 )
                 await asyncio.sleep(delay)
                 continue
-            await self._account(run_id, response, result)
-            ensure_not_empty(response, self.provider.name)
             return response
         raise AssertionError("unreachable")
 

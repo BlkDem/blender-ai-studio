@@ -48,21 +48,25 @@ async def test_retry_success(monkeypatch):
     assert result.text == "done"
     assert result.steps == 1
     assert result.totals.input_tokens == 12
-    assert [call.args[0] for call in sleep.call_args_list] == [2, 30]
+    assert [call.args[0] for call in sleep.call_args_list] == [3, 30]
     retries = [e for e in agent.bus.history() if e.type == EventType.REQUEST_RETRY]
     assert [e.payload["attempt"] for e in retries] == [2, 3]
-    assert all(e.run_id == "retry" and e.payload["max_attempts"] == 3 for e in retries)
+    assert all(e.run_id == "retry" and e.payload["max_attempts"] == 11 for e in retries)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retryable,expected", [(True, 3), (False, 1)])
+@pytest.mark.parametrize("retryable,expected", [(True, 11), (False, 1)])
 async def test_failure_visible(monkeypatch, retryable, expected):
-    monkeypatch.setattr("app.core.agent.asyncio.sleep", AsyncMock())
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.core.agent.asyncio.sleep", sleep)
     error = ProviderError("upstream failed", retryable=retryable, hint="Try another model")
-    agent = make([error] * 3, stream=False)
+    agent = make([error] * 11, stream=False)
     with pytest.raises(ProviderError):
         await agent.run("hello")
     assert agent.provider.calls == expected
+    assert [call.args[0] for call in sleep.call_args_list] == (
+        list(range(3, 31, 3)) if retryable else []
+    )
     failed = [e for e in agent.bus.history() if e.type == EventType.RUN_FAILED]
     assert len(failed) == 1
     assert failed[0].payload["detail"] == "upstream failed"
@@ -107,10 +111,44 @@ async def test_backoff_inside_timeout():
 
 
 @pytest.mark.asyncio
-async def test_empty_stream_is_failure_and_usage_accounted():
-    agent = make([[StreamChunk(type="usage", usage=Usage(input_tokens=9))]])
+async def test_empty_stream_is_failure_and_usage_accounted(monkeypatch):
+    monkeypatch.setattr("app.core.agent.asyncio.sleep", AsyncMock())
+    agent = make([[StreamChunk(type="usage", usage=Usage(input_tokens=9))] for _ in range(11)])
     with pytest.raises(ProviderError, match="empty response"):
         await agent.run("hello")
-    assert agent.provider.calls == 1
-    assert agent.cost.totals.input_tokens == 9
+    assert agent.provider.calls == 11
+    assert agent.cost.totals.input_tokens == 99
     assert agent.bus.history()[-1].type == EventType.RUN_FAILED
+
+
+@pytest.mark.asyncio
+async def test_empty_stream_retries_then_succeeds(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.core.agent.asyncio.sleep", sleep)
+    agent = make([
+        [StreamChunk(type="usage", usage=Usage(input_tokens=9))],
+        [StreamChunk(type="text", text="done")],
+    ])
+    result = await agent.run("hello")
+    assert result.text == "done"
+    assert agent.provider.calls == 2
+    assert agent.cost.totals.input_tokens == 9
+    sleep.assert_awaited_once_with(3)
+    assert any(e.type == EventType.REQUEST_RETRY for e in agent.bus.history())
+
+
+@pytest.mark.asyncio
+async def test_nonstream_provider_empty_response_retries(monkeypatch):
+    from app.llm.base import ensure_not_empty
+
+    monkeypatch.setattr("app.core.agent.asyncio.sleep", AsyncMock())
+
+    class ValidatingProvider(Provider):
+        async def chat(self, request):
+            return ensure_not_empty(await super().chat(request), self.name)
+
+    agent = Agent(ValidatingProvider([ChatResponse(), ChatResponse(text="done")]),
+                  "test", FakeMCP(), stream=False)
+    result = await agent.run("hello")
+    assert result.text == "done"
+    assert agent.provider.calls == 2
