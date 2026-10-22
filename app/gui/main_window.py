@@ -45,7 +45,7 @@ from app.core.events import EventType
 from app.gui.benchmark.panel import BenchmarkPanel
 from app.gui.bridge import CoreThread, format_money
 from app.gui.chat.history import HistoryPopup
-from app.gui.chat.widget import ChatView
+from app.gui.chat.widget import ChatView, image_mime_type
 from app.gui.models.panel import ModelsPanel
 from app.gui.projects.panel import ProjectsPanel
 from app.gui.scene.panel import ScenePanel
@@ -93,9 +93,9 @@ class MainWindow(QMainWindow):
         self._retry_timer.timeout.connect(self._update_retry_countdown)
         self._active_agent: Any = None
         self._agent: Any = None
-        self._agent_provider = ""
-        self._agent_gate: bool | None = None
-        self._agent_external_3d_enabled: bool | None = None
+        #: Everything the agent was built from. A turn whose key differs gets a
+        #: new agent, so a changed model or setting reaches the next request.
+        self._agent_key: tuple[Any, ...] | None = None
         self._conversation_id = ""
         #: The restored block, handed to the agent when it is built. Kept here
         #: rather than read from the database per turn so that the agent is still
@@ -709,6 +709,7 @@ class MainWindow(QMainWindow):
     def _new_conversation(self) -> None:
         """Start a fresh conversation, in whatever project is now open."""
         self._agent = None
+        self._agent_key = None
         self._conversation_id = ""
         # The model has to be told, or the first turn of the "new" conversation
         # still carries everything the old one said.
@@ -947,7 +948,9 @@ class MainWindow(QMainWindow):
                     for picture in pictures:
                         self.chat.add_attachment(picture)
                     return
-                self._agent = None
+                # Rebuilt on the next turn, with the memory carried over: the
+                # model now declares vision, and the agent read that at birth.
+                self._agent_key = None
                 if self.model_selector.currentData() != chosen_model:
                     self.chat.input.setText(text)
                     for picture in pictures:
@@ -963,6 +966,15 @@ class MainWindow(QMainWindow):
 
             self.core.submit(enable_images(), enabled)
             return
+        # Built here, on the GUI thread, from the selector as it is *now*: the
+        # core thread must not read a widget, and a selector moved between this
+        # click and the coroutine starting would send the turn to another model.
+        try:
+            agent = self._agent_for_turn(self.current_provider(), self.current_model())
+        except Exception as exc:  # noqa: BLE001 - shown, not raised, into Qt
+            self.chat.add_note(f"Could not start the run: {exc}", role="error")
+            return
+        self._active_agent = agent
         self.chat.add_message("user", text, images=pictures)
         self._answer_seen = False
         self._run_failure = ""
@@ -977,7 +989,7 @@ class MainWindow(QMainWindow):
         if chosen and chosen != self._last_saved_model:
             self._last_saved_model = chosen
             self.core.submit(self._store_last_model(chosen), lambda _s: None)
-        self.core.submit(self._run_agent(text, pictures), self._run_finished)
+        self.core.submit(self._run_agent(agent, text, pictures), self._run_finished)
 
     def _model_sees_images(self) -> bool:
         """Whether the selected model is declared multimodal."""
@@ -985,51 +997,64 @@ class MainWindow(QMainWindow):
         info = self.context.llm.find(self.current_provider(), self.current_model())
         return bool(getattr(info, "supports_vision", False))
 
-    def _agent_for_turn(self) -> Any:
-        # The gate is read at agent construction, so a change in Settings has to
-        # make the next turn build a new agent.
+    def _agent_for_turn(self, provider: str = "", model: str = "") -> Any:
         """One agent per conversation, not one per turn.
 
         A new agent every turn meant a new conversation every turn: the model was
         stateless, and the transcript in the window looked continuous anyway,
         which is worse than an obvious break -- the user reads a memory that is
         not there.
+
+        The agent is rebuilt when anything it was built from changes -- the
+        model, the gates, the prompt, the limits, the model's declared
+        capabilities -- and the rebuilt one inherits the conversation: its id,
+        and what the model has been told so far. A provider switch keeps only
+        the text turns, because tool-call ids and signatures are one vendor's.
         """
-        gate = self.context.settings.agent.allow_execute_python
-        external_3d_enabled = self.context.settings.three_d.enabled
-        if (
-            self._agent is None
-            or self._agent_provider != self.current_provider()
-            or self._agent_gate != gate
-            or self._agent_external_3d_enabled != external_3d_enabled
-        ):
-            self._agent = self.context.agent(
-                self.current_provider(),
-                self.current_model(),
-                conversation_id=self._conversation_id,
-                history=self._history,
-            )
-            self._agent_provider = self.current_provider()
-            self._agent_gate = gate
-            self._agent_external_3d_enabled = external_3d_enabled
+        provider = provider or self.current_provider()
+        model = model or self.current_model()
+        settings = self.context.settings
+        registry = self.context.llm
+        key = (
+            provider,
+            model,
+            settings.agent.allow_execute_python,
+            settings.three_d.enabled,
+            repr(settings.agent),
+            repr(getattr(settings, "budgets", None)),
+            repr(registry.find(provider, model) if registry is not None else None),
+        )
+        if self._agent is not None and self._agent_key == key:
+            return self._agent
+        previous, previous_key = self._agent, self._agent_key
+        if previous is not None:
+            conversation_id = previous.conversation_id or self._conversation_id
+            memory = list(previous._memory)  # noqa: SLF001
+            # No key with an agent still here means "rebuild this one" -- the
+            # vision switch -- which is never a change of provider.
+            same_provider = previous_key is None or previous_key[0] == provider
+            history = memory if same_provider else history_block(memory)
+        else:
+            conversation_id, history = self._conversation_id, self._history
+        self._agent = self.context.agent(
+            provider,
+            model,
+            conversation_id=conversation_id,
+            history=history,
+        )
+        self._agent_key = key
         return self._agent
 
-    async def _run_agent(self, text: str, images: list[str] | None = None) -> Any:
-        try:
-            agent = self._agent_for_turn()
-        except Exception as exc:
-            return exc
-        # Kept so Stop has something to stop. The agent was built and dropped
-        # inside this coroutine, which made the button a no-op that still looked
-        # like it worked: the run finished, the UI had already said otherwise.
-        self._active_agent = agent
-        parts = [ContentPart.image_part(data, "image/png") for data in images or []]
+    async def _run_agent(self, agent: Any, text: str, images: list[str] | None = None) -> Any:
+        parts = [ContentPart.image_part(data, image_mime_type(data)) for data in images or []]
         try:
             return await agent.run(text, images=parts)
         except Exception as exc:
             return exc
         finally:
-            self._active_agent = None
+            # The run is over whichever way it ended; Stop has nothing left to stop.
+            if self._active_agent is agent:
+                self._active_agent = None
 
     def _set_run_status(self, text: str) -> None:
         self._retry_timer.stop()
@@ -1124,12 +1149,10 @@ class MainWindow(QMainWindow):
             self.core.submit(self._store_last_model(chosen), lambda _s: None)
 
     def _model_selected(self, chosen: str) -> None:
-        provider, _, model = chosen.partition(":")
         for index in range(self.model_selector.count()):
             if self.model_selector.itemData(index) == chosen:
                 self.model_selector.setCurrentIndex(index)
                 return
-        del provider, model
 
     # --- events ------------------------------------------------------------
 

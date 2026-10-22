@@ -567,7 +567,7 @@ and therefore what makes tool calling work.
 
 ## Testing
 
-292 tests, no network and no Blender needed for the majority.
+About 600 tests, no network and no Blender needed for the majority.
 
 | Area | What is covered |
 |---|---|

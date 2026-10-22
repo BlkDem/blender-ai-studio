@@ -69,14 +69,28 @@ async def test_yes_persists_vision_before_submitting_all_images(window, monkeypa
     monkeypatch.setattr(QMessageBox, "question", yes)
     messages = []
     monkeypatch.setattr(window.chat, "add_message", lambda *args, **kwargs: messages.append((args, kwargs)))
-    window._agent = object()
+
+    class Agent:
+        async def run(self, text, *, images):
+            assert text == "Build these references"
+            assert [part.data for part in images] == pictures
+            return "submitted"
+
+    built = []
+    monkeypatch.setattr(
+        window, "_agent_for_turn", lambda provider="", model="": built.append((provider, model)) or Agent()
+    )
+    window._agent_key = ("stale",)
     window.chat.send.click()
     assert window.chat.busy()
     assert not messages
     assert len(pending) == 1
     coroutine, callback = pending.pop(0)
     callback(await coroutine)
-    assert window._agent is None
+    # The agent read the model's capabilities when it was built, so the next
+    # turn gets a new one -- built once, for the turn that was held back.
+    assert window._agent_key is None
+    assert built == [(window.current_provider(), window.current_model())]
     assert len(questions) == 1
     assert window._model_sees_images()
     stored = await window.context.studio.settings.get("llm_providers")
@@ -87,14 +101,6 @@ async def test_yes_persists_vision_before_submitting_all_images(window, monkeypa
     assert not window.chat.attachments()
     assert window.chat.input.text() == ""
     assert window.chat.busy()
-
-    class Agent:
-        async def run(self, text, *, images):
-            assert text == "Build these references"
-            assert [part.data for part in images] == pictures
-            return "submitted"
-
-    monkeypatch.setattr(window, "_agent_for_turn", lambda: Agent())
     results = []
     for coroutine, callback in pending:
         results.append(await coroutine)

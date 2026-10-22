@@ -314,7 +314,7 @@ def _to_wire(messages: list[Message], names: ToolNameMap | None = None) -> tuple
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id or "",
                     "content": content,
-                    **({"is_error": True} if message.content.startswith("Error:") else {}),
+                    **({"is_error": True} if message.is_error or message.content.startswith("Error:") else {}),
                 }
             )
             continue

@@ -21,14 +21,14 @@ import logging
 import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from app.core.cost import Budget, CostTotals, CostTracker
 from jsonschema import SchemaError, ValidationError, validate
 
+from app.core.cost import Budget, CostTotals, CostTracker
 from app.core.errors import AgentError, BudgetExceeded, MCPError, ProviderError, StudioError
-from app.core.events import Event, EventBus, EventType, new_run_id
+from app.core.events import EventBus, EventType, new_run_id
 from app.llm.base import (
     ChatRequest,
     ChatResponse,
@@ -573,11 +573,14 @@ class Agent:
                     thought_signature=chunk.thought_signature,
                 )
                 arguments[chunk.call_id] = ""
-            elif chunk.type == "tool_delta":
-                arguments[chunk.call_id] = arguments.get(chunk.call_id, "") + chunk.partial
+                # Once per call, not once per fragment: a long argument arrives
+                # as hundreds of deltas, and every event is kept in the bus's
+                # history.
                 self._publish(
                     run_id, EventType.TOOL_STARTED, tool=chunk.name, call_id=chunk.call_id, streaming=True
                 )
+            elif chunk.type == "tool_delta":
+                arguments[chunk.call_id] = arguments.get(chunk.call_id, "") + chunk.partial
             elif chunk.type == "tool_end":
                 call = calls.get(chunk.call_id)
                 if call is not None:
@@ -603,8 +606,6 @@ class Agent:
 
     async def _account(self, run_id: str, response: ChatResponse, result: RunResult) -> None:
         """Price one request, check the per-request limit, publish the cost."""
-        if self.model is not None:
-            self.cost.set_model(self.cost.model)
         cost = self.cost.add_usage(response.usage)
         result.totals = self._run_totals()
         if self.studio is not None:
@@ -743,7 +744,15 @@ class Agent:
         they see one, which would turn a stopped run into a broken conversation.
 
         Also bounded: a long session would otherwise grow the prompt without end,
-        and the same budget as a resumed block applies.
+        and the same budget as a resumed block applies. A tool's pictures are
+        dropped on the way: the model saw the render in the run that made it, and
+        re-sending every render of the session with every later request is a
+        cost the size check above cannot even see. The person's own attachments
+        are kept.
+
+        And it starts on a user turn, for the same reason
+        :func:`history_block` does: trimming the old end can leave a tool call
+        first, and Gemini refuses a function call that no user turn precedes.
         """
         groups: list[list[Message]] = []
         index = 0
@@ -752,7 +761,7 @@ class Agent:
             index += 1
             if message.role is Role.TOOL:
                 continue
-            group = [message]
+            group: list[Message] = [message]
             if message.role is Role.ASSISTANT and message.tool_calls:
                 expected = {call.id for call in message.tool_calls}
                 seen: set[str] = set()
@@ -763,7 +772,7 @@ class Agent:
                     if reply.tool_call_id not in expected or reply.tool_call_id in seen:
                         valid = False
                     seen.add(reply.tool_call_id)
-                    group.append(reply)
+                    group.append(replace(reply, parts=[]) if reply.parts else reply)
                 if not valid or seen != expected:
                     continue
             groups.append(group)
@@ -775,7 +784,10 @@ class Agent:
                 break
             kept.append(group)
             total += size
-        return [message for group in reversed(kept) for message in group]
+        kept.reverse()
+        while kept and kept[0][0].role is not Role.USER:
+            kept.pop(0)
+        return [message for group in kept for message in group]
 
     def _with_recovery_hint(self, tool: str, error_code: str, text: str) -> str:
         """Turn one refusal into a step the model can take.
@@ -928,9 +940,8 @@ class Agent:
     # --- events ------------------------------------------------------------
 
     def _publish(self, run_id: str, event_type: EventType, **payload: Any) -> None:
-        event = Event(type=event_type, run_id=run_id, payload=payload)
         with contextlib.suppress(RuntimeError):
-            self.bus.emit(event.type, run_id=run_id, **payload)
+            self.bus.emit(event_type, run_id=run_id, **payload)
 
 
 def _parse(raw: str) -> dict[str, Any]:

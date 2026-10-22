@@ -176,7 +176,7 @@ app/
   gui/               the window and its seven panels, and the core thread
   mcp/support.py     a real MCP server used by the tests and as a second server
 examples/            the live runs, described in the README's testing section
-tests/               292 tests, mirroring app/ directory for directory
+tests/               ~600 tests, mirroring app/ directory for directory
 ```
 
 ## Things that will look like mistakes

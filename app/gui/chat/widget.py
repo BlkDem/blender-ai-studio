@@ -166,6 +166,20 @@ def image_suffix(raw: bytes) -> str:
     return ".png"
 
 
+def image_mime_type(data: str) -> str:
+    """The mime type of a base64 picture, from its bytes.
+
+    An attachment that was too large as PNG goes out as JPEG, and a provider
+    that checks the declared type against the bytes refuses the whole request.
+    """
+    try:
+        head = base64.b64decode(data[:64] + "=" * (-len(data[:64]) % 4))
+    except (ValueError, TypeError):
+        return "image/png"
+    suffix = image_suffix(head)
+    return {".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}.get(suffix, "image/png")
+
+
 class ImageLabel(QLabel):
     """A picture in the transcript, which the user can keep.
 

@@ -34,7 +34,7 @@ ruff check . && ruff format .                   # lint and format
 mypy app                                        # types, with disallow_untyped_defs
 ```
 
-The suite is 292 tests and takes about 35 seconds. `-p no:cacheprovider` is worth
+The suite is about 600 tests and takes a couple of minutes. `-p no:cacheprovider` is worth
 adding when running under a file watcher. GUI tests set `QT_QPA_PLATFORM=offscreen`
 themselves before importing Qt, so they need no display.
 

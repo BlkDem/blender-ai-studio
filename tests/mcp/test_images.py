@@ -94,3 +94,13 @@ def test_a_non_image_at_the_path_is_ignored(tmp_path: Path) -> None:
 def _write(path: Path, payload: bytes = PNG) -> Path:
     path.write_bytes(payload)
     return path
+
+
+def test_the_declared_type_is_one_providers_accept(tmp_path: Path) -> None:
+    """``image/jpg`` is not a mime type, and a JPEG saved as ``.png`` is a JPEG."""
+    from app.mcp.images import mime_type
+
+    assert mime_type(_write(tmp_path / "a.jpg", b"\xff\xd8\xff\xe0rest")) == "image/jpeg"
+    assert mime_type(_write(tmp_path / "lies.png", b"\xff\xd8\xff\xe0rest")) == "image/jpeg"
+    assert mime_type(_write(tmp_path / "noext", PNG)) == "image/png"
+    assert mime_type(_write(tmp_path / "a.bmp", b"BMrest")) is None

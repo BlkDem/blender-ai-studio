@@ -189,3 +189,24 @@ async def test_a_task_queued_as_the_core_closes_is_closed_not_dropped(qapp, data
     finally:
         await context.close()
     qapp.processEvents()
+
+
+async def test_a_model_switch_rebuilds_the_agent_and_keeps_the_conversation(window, qapp) -> None:
+    """Moving the selector within one provider used to leave the old model
+    answering; rebuilding for it must not cost the conversation either."""
+    from app.llm.providers.mock import MockLLMProvider, ScriptedTurn
+
+    provider = MockLLMProvider([ScriptedTurn(text="ok")], model="scripted-model")
+    window.context.llm.set_provider("scripted", provider)
+    window.model_selector.setCurrentIndex(0)
+    window.send("remember this")
+    assert await _drain(qapp, lambda: "ok" in window.chat.transcript_text())
+    await _settle(window, qapp)
+
+    first = window._agent_for_turn()  # noqa: SLF001
+    switched = window._agent_for_turn(window.current_provider(), "another-model")  # noqa: SLF001
+    assert switched is not first
+    assert switched.model == "another-model"
+    assert switched.conversation_id and switched.conversation_id == first.conversation_id
+    assert "remember this" in [m.content for m in switched._memory]  # noqa: SLF001
+    assert window._agent_for_turn(window.current_provider(), "another-model") is switched  # noqa: SLF001

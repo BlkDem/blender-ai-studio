@@ -184,9 +184,14 @@ async def collect(bus: EventBus, run_id: str, count: int, timeout: float) -> lis
 
 
 async def stream(bus: EventBus, run_id: str) -> AsyncIterator[Event]:
-    """Follow a run that is already in flight."""
+    """Follow a run that is already in flight -- that run, not every run."""
     queue: asyncio.Queue[Event] = asyncio.Queue()
-    unsubscribe = bus.subscribe(queue.put_nowait)
+
+    def follow(event: Event) -> None:
+        if event.run_id == run_id:
+            queue.put_nowait(event)
+
+    unsubscribe = bus.subscribe(follow)
     try:
         for event in bus.history(run_id):
             yield event

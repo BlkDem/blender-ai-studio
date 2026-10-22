@@ -775,3 +775,16 @@ def test_capabilities_are_data_not_a_name() -> None:
     model = ModelInfo(id="space-bunny-free", provider="p", supports_vision=False)
     assert model.supports_vision is False
     assert model.to_dict()["supports_vision"] is False
+
+
+def test_anthropic_marks_a_failed_tool_whatever_its_text_says() -> None:
+    from app.llm.base import Message, ToolCall
+    from app.llm.providers.anthropic import _to_wire
+
+    call = ToolCall.new("blender.get_scene", {})
+    _system, wire = _to_wire([
+        Message.user("go"),
+        Message.assistant(tool_calls=[call]),
+        Message.tool_result(call, '{"code": "NO_SCENE"}', is_error=True),
+    ])
+    assert wire[-1]["content"][0]["is_error"] is True

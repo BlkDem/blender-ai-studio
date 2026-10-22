@@ -142,3 +142,13 @@ def test_jpeg_payload_renders_in_staging_and_transcript(qapp):
     label = bubble.findChild(ImageLabel)
     assert not label.pixmap().isNull()
     assert label.suggested_name().endswith(".jpg")
+
+
+def test_an_attachment_declares_the_format_its_bytes_are_in() -> None:
+    """A large attachment is written as JPEG, and must not be sent as a PNG."""
+    import base64
+
+    from app.gui.chat.widget import image_mime_type
+
+    assert image_mime_type(base64.b64encode(b"\xff\xd8\xff\xe0" + b"x" * 80).decode()) == "image/jpeg"
+    assert image_mime_type(base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 80).decode()) == "image/png"

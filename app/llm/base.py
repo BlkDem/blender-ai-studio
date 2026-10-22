@@ -97,6 +97,9 @@ class Message:
     tool_call_id: str | None = None
     name: str | None = None
     reasoning: str = ""
+    #: For a tool result: whether the tool failed. Carried rather than guessed
+    #: from the text, because an MCP error need not start with "Error:".
+    is_error: bool = False
 
     @classmethod
     def system(cls, text: str) -> Message:
@@ -111,8 +114,17 @@ class Message:
         return cls(role=Role.ASSISTANT, content=text, tool_calls=list(tool_calls))
 
     @classmethod
-    def tool_result(cls, call: ToolCall, content: str, parts: Sequence[ContentPart] = ()) -> Message:
-        return cls(role=Role.TOOL, content=content, tool_call_id=call.id, name=call.name, parts=list(parts))
+    def tool_result(
+        cls, call: ToolCall, content: str, parts: Sequence[ContentPart] = (), *, is_error: bool = False
+    ) -> Message:
+        return cls(
+            role=Role.TOOL,
+            content=content,
+            tool_call_id=call.id,
+            name=call.name,
+            parts=list(parts),
+            is_error=is_error,
+        )
 
     def text(self) -> str:
         return self.content or "".join(part.text for part in self.parts if part.type == "text")
@@ -281,7 +293,7 @@ class ToolResult:
     images: list[ContentPart] = field(default_factory=list)
 
     def message(self) -> Message:
-        return Message.tool_result(self.call, self.content, parts=list(self.images))
+        return Message.tool_result(self.call, self.content, parts=list(self.images), is_error=self.is_error)
 
 
 @dataclass(slots=True)

@@ -8,7 +8,7 @@ import pytest
 
 from app.core.agent import Agent, LocalTool, RunResult
 from app.core.cost import Budget
-from app.llm.base import Message, ToolCall, ToolResult
+from app.llm.base import ContentPart, Message, ToolCall, ToolResult
 from app.llm.models import ModelInfo
 from app.llm.providers.mock import ScriptedTurn
 from tests.agent.test_agent import FakeMCP, agent_with
@@ -112,12 +112,29 @@ async def test_external_cancellation_preserves_only_complete_memory():
 def test_replay_atomic_groups_and_orphans():
     a, b = ToolCall.new("a", {}), ToolCall.new("b", {})
     group = [Message.assistant(tool_calls=[a, b]), Message.tool_result(a, "ok"), Message.tool_result(b, "ok")]
-    assert Agent._replayable(group) == group
+    question = Message.user("q")
+    assert Agent._replayable([question, *group]) == [question, *group]
+    # A block that opens on a tool call is refused by Gemini, so it never opens on one.
+    assert Agent._replayable(group) == []
     assert Agent._replayable(group[:-1]) == []
     assert Agent._replayable([group[1]]) == []
     assert Agent._replayable([group[0], group[1], group[1]]) == []
     assert Agent._replayable([Message.user("old"), group[0], Message.tool_result(a, "x" * 25000), group[2],
                               Message.user("new")]) == [Message.user("new")]
+
+
+def test_replay_drops_tool_pictures_but_keeps_attachments():
+    call = ToolCall.new("blender.render_preview", {})
+    render = ContentPart.image_part("cmVuZGVy", "image/png")
+    attached = Message.user("look")
+    attached.parts = [ContentPart.image_part("cGhvdG8=", "image/jpeg")]
+    replayed = Agent._replayable([
+        attached,
+        Message.assistant(tool_calls=[call]),
+        Message.tool_result(call, "rendered", parts=[render]),
+    ])
+    assert replayed[0].parts == attached.parts
+    assert replayed[2].content == "rendered" and replayed[2].parts == []
 
 
 async def test_capabilities_disable_tools_and_fallback_to_chat():

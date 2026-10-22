@@ -68,23 +68,41 @@ def readable(path: str) -> Path | None:
     return None
 
 
-def is_image(path: Path) -> bool:
-    if path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
-        return True
+#: The formats every vision API takes, by extension. A BMP or TIFF is a picture
+#: too, but a request that declares one is refused, so it is not offered.
+_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def mime_type(path: Path) -> str | None:
+    """What the file really is, from its first bytes, then its extension.
+
+    The bytes win: a render saved as JPEG under a ``.png`` name is still a JPEG,
+    and a provider that checks the declared type against the data rejects it.
+    """
     try:
         with path.open("rb") as handle:
-            head = handle.read(8)
+            head = handle.read(12)
     except OSError:  # pragma: no cover - unreadable file
-        return False
-    return (
-        head.startswith(b"\x89PNG")
-        or head.startswith(b"\xff\xd8\xff")
-        or head[:6]
-        in (
-            b"GIF87a",
-            b"GIF89a",
-        )
-    )
+        head = b""
+    if head.startswith(b"\x89PNG"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return _MIME_BY_SUFFIX.get(path.suffix.lower())
+
+
+def is_image(path: Path) -> bool:
+    return mime_type(path) is not None
 
 
 def fetch(bridge: MCPManager, text: str, *, max_bytes: int = MAX_IMAGE_BYTES) -> tuple[str, str] | None:
@@ -98,7 +116,7 @@ def fetch(bridge: MCPManager, text: str, *, max_bytes: int = MAX_IMAGE_BYTES) ->
 
     for candidate in paths_in(text):
         found = readable(candidate)
-        if found is None or not is_image(found):
+        if found is None or mime_type(found) is None:
             continue
         try:
             if found.stat().st_size > max_bytes:
@@ -108,7 +126,7 @@ def fetch(bridge: MCPManager, text: str, *, max_bytes: int = MAX_IMAGE_BYTES) ->
         except OSError as exc:  # pragma: no cover - raced or vanished
             logger.info("could not read %s: %s", found, exc)
             continue
-        mime = "image/png" if found.suffix.lower() == ".png" else f"image/{found.suffix.lstrip('.').lower()}"
+        mime = mime_type(found) or "image/png"
         logger.info("read %s from %s", len(payload), found)
         return base64.b64encode(payload).decode(), mime
     return None
